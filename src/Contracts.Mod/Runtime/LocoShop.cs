@@ -23,14 +23,19 @@ namespace Contracts.Mod.Runtime
     ///   locomotive or caboose type the game knows, the custom car loader's included. A
     ///   locomotive comes with its tender: the S282's, or a custom one's trainset.
     /// - **Coaches:** the stock passenger coaches, and any other car type that carries passengers,
-    ///   sold as a train of 2, 4 or 6 (a custom set as it comes), and delivered onto a free
-    ///   platform of the passenger city the kiosk is at, else of the nearest one (Passengers),
-    ///   where a departure can form from them.
+    ///   sold as a train of 2, 4 or 6 (a custom set as it comes). A departure forms from them
+    ///   wherever they stand (PassengerRuns), and the player brings them to its platform.
+    ///
+    /// Everything bought arrives through an interchange, as every other car does (owner,
+    /// 2026-11-03: "new coaches should arrive at the interchange not magically at the station",
+    /// then "yes" to locomotives too): at once, on a free track of the interchange whose office
+    /// sold it, else of the one nearest the kiosk's station, else the other. With none free,
+    /// nothing is sold.
     ///
     /// A vehicle bought comes with its license (LicenseRules.LicenseOwned), so its cab is never
-    /// locked. A purchase is delivered at once to the station whose kiosk sold it, on its locomotive
-    /// track (where the game used to spawn free ones) when that is clear, else on the nearest
-    /// free storage track; at an interchange office, on a free track of the interchange.
+    /// locked. Only a new career's starter DE2 (CareerRules) is delivered at a station: on its
+    /// locomotive track (where the game used to spawn free ones) when that is clear, else on the
+    /// nearest free storage track (<see cref="Deliver"/>).
     ///
     /// The price is the game's own value of the vehicle: what it charges to rebuild its body,
     /// wheels and powertrain, summed over the cars. A custom vehicle without those prices costs
@@ -45,6 +50,7 @@ namespace Contracts.Mod.Runtime
             public string Name;
             public List<TrainCarLivery> Cars;
             public float Price;
+            public Kind Kind;   // the shop it is sold in: coaches arrive at an interchange
         }
 
         private const int NameLength = 24;
@@ -106,10 +112,10 @@ namespace Contracts.Mod.Runtime
         private static IEnumerable<Item> Sized(Kind kind, string name, List<TrainCarLivery> cars)
         {
             if (kind != Kind.Coaches || cars.Count != 1)
-                return new[] { new Item { Name = name, Cars = cars, Price = PriceOf(cars) } };
+                return new[] { new Item { Name = name, Cars = cars, Price = PriceOf(cars), Kind = kind } };
             var stem = name.Length <= NameLength - 3 ? name : name.Substring(0, NameLength - 4).TrimEnd() + ".";
             return TrainSizes.Select(n => Enumerable.Repeat(cars[0], n).ToList())
-                .Select(train => new Item { Name = $"{stem} x{train.Count}", Cars = train, Price = PriceOf(train) });
+                .Select(train => new Item { Name = $"{stem} x{train.Count}", Cars = train, Price = PriceOf(train), Kind = kind });
         }
 
         /// <summary>Whether a livery is a coach: it carries passengers and is no locomotive, tender or caboose.</summary>
@@ -179,6 +185,21 @@ namespace Contracts.Mod.Runtime
 
         public static double Money => SingletonBehaviour<Inventory>.Instance?.PlayerMoney ?? 0.0;
 
+        /// <summary>Why an item can't be bought now, for the kiosk's info screen: the money falls short, by how much.</summary>
+        public static string ShortOf(Item item) =>
+            $"Not enough money for {item.Name}.\n\nIt costs ${item.Price:N0}. You have ${Money:N0}, ${Math.Max(0.0, item.Price - Money):N0} short.";
+
+        /// <summary>The kiosk's question before a purchase: the price, and where the vehicle arrives.</summary>
+        public static string AskToBuy(Item item, Kiosk.KioskPlace place)
+        {
+            // It arrives on a free track of an interchange: this office's, else the one nearest here (DeliverThroughInterchange).
+            var first = InterchangesFor(place).FirstOrDefault();
+            var at = first == null ? "an interchange" : $"the {InterchangeYards.CodeOf(first)} interchange";
+            var why = place != null && place.IsInterchange && first == place.Id ? "here" : "the nearest";
+            return $"Buy {item.Name} for ${item.Price:N0}? It arrives at once on a free track at {at} ({why}), else at the other one." +
+                   (item.Kind == Kind.Coaches ? " Bring them to a platform to board." : "");
+        }
+
         /// <summary>Buys an item for delivery at a kiosk's place; the message for the kiosk.</summary>
         public static string Buy(Item item, Kiosk.KioskPlace place)
         {
@@ -186,27 +207,14 @@ namespace Contracts.Mod.Runtime
             if (inventory == null)
                 return "The cash register is not working.";
             if (inventory.PlayerMoney < item.Price)
-                return $"{item.Name} costs ${item.Price:N0}; you have ${inventory.PlayerMoney:N0}.";
-            List<TrainCar> spawned;
-            string where = null;
-            if (item.Cars.All(IsCoach))
-                spawned = DeliverCoaches(item.Cars, place, out where);
-            else if (place != null && place.IsInterchange)
-                spawned = DeliverAtInterchange(item.Cars, place.Id, out where);
-            else
-            {
-                var station = place == null ? null : StationController.allStations?.FirstOrDefault(s => s != null && s.stationInfo.YardID == place.Id);
-                spawned = station == null ? null : Deliver(item.Cars, station, out where);
-                where = station == null ? "no station here" : where;
-            }
+                return ShortOf(item);
+            var spawned = DeliverThroughInterchange(item.Cars, place, out var where);
             if (spawned == null)
-                return item.Cars.All(IsCoach)
-                    ? $"No free platform for the {item.Name}; clear one at a passenger city and try again."
-                    : $"No free track here for the {item.Name}; clear the locomotive track and try again.";
+                return $"No free interchange track for {item.Name}.\n\nClear one at WI or NEI and try again. Nothing was paid.";
             inventory.RemoveMoney(item.Price);
             LicenseRules.LicenseOwned(spawned, null);
             Main.Log($"shop: sold {item.Name} for ${item.Price:N0}: {string.Join(", ", spawned.Select(c => c.ID))} on {where}");
-            return $"{item.Name} {spawned[0].ID} delivered on {where}. ${item.Price:N0} paid.";
+            return $"{item.Name} delivered on {where}: {string.Join(", ", spawned.Select(c => c.ID))}.\n\n${item.Price:N0} paid. You have ${inventory.PlayerMoney:N0} left.";
         }
 
         /// <summary>Owned cars delivered at a station: its locomotive track, else a free storage track.</summary>
@@ -248,34 +256,40 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>
-        /// Coaches delivered onto a free platform (a track Passenger Jobs starts trains on) of the
-        /// passenger city the kiosk is at, else of the nearest passenger city with one free.
+        /// A purchase delivered at an interchange, as every car comes onto the map: on a free track
+        /// of the interchange whose office sold it, else of the one nearest the station, else the other.
         /// </summary>
-        private static List<TrainCar> DeliverCoaches(IEnumerable<TrainCarLivery> cars, Kiosk.KioskPlace place, out string where)
+        private static List<TrainCar> DeliverThroughInterchange(IEnumerable<TrainCarLivery> cars, Kiosk.KioskPlace place, out string where)
         {
             var list = cars.ToList();
-            var length = Length(list);
-            var yard = place == null ? null : place.IsInterchange ? InterchangeYards.StationOf(place.Id) : place.Id;
-            var here = Economy.Station(yard);
-            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
-            var cities = Passengers.Cities().Select(c => (City: c, Station: Economy.Station(c))).Where(c => c.Station != null)
-                .OrderBy(c => c.City == yard ? -1f : here == null ? 0f : (c.Station.transform.position - here.transform.position).sqrMagnitude);
-            foreach (var (city, _) in cities)
-                foreach (var track in Passengers.Terminus(city))
+            foreach (var interchange in InterchangesFor(place))
+            {
+                var spawned = DeliverAtInterchange(list, interchange, out where);
+                if (spawned != null)
                 {
-                    if (organizer == null || track.GetCarsFullyOnTrack().Count > 0 || track.GetCarsPartiallyOnTrack().Count > 0
-                        || organizer.GetFreeSpaceOnTrack(track) < length + 10.0)
-                        continue;
-                    var rail = RailTrackRegistry.LogicToRailTrack.TryGetValue(track, out var r) ? r : null;
-                    var spawned = rail == null ? null : Spawn(list, Middle(rail));
-                    if (spawned != null)
-                    {
-                        where = $"platform {track.ID.FullDisplayID}";
-                        return spawned;
-                    }
+                    where = $"{where} at {InterchangeYards.CodeOf(interchange)}";
+                    return spawned;
                 }
+            }
             where = null;
             return null;
+        }
+
+        /// <summary>The interchanges in the order a purchase tries them: the office's own, else nearest the kiosk's station first.</summary>
+        internal static List<string> InterchangesFor(Kiosk.KioskPlace place)
+        {
+            var all = InterchangeYards.All();
+            if (place != null && place.IsInterchange && all.ContainsKey(place.Id))
+                return new[] { place.Id }.Concat(all.Keys.Where(k => k != place.Id)).ToList();
+            var station = place == null ? null : Economy.Station(place.Id);
+            float Distance(List<Track> tracks)
+            {
+                if (station == null)
+                    return 0f;
+                return tracks.Select(t => RailTrackRegistry.LogicToRailTrack.TryGetValue(t, out var r) ? (Middle(r) - station.transform.position).sqrMagnitude : float.MaxValue)
+                    .DefaultIfEmpty(float.MaxValue).Min();
+            }
+            return all.OrderBy(kv => Distance(kv.Value)).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key).ToList();
         }
 
         private static List<TrainCar> DeliverAtInterchange(IEnumerable<TrainCarLivery> cars, string interchange, out string where)

@@ -28,6 +28,7 @@ namespace Contracts.Mod.Spike
         private static bool quitAfter;
         private StreamWriter log;
         private int problems;
+        private bool shopsChecked;
         private static readonly List<string> errors = new List<string>();
 
         public static void Install(string modFolder)
@@ -205,6 +206,66 @@ namespace Contracts.Mod.Spike
             Line($"{name}: list '{x.List.Place?.Id}': {x.List.Entries.Count} entries; shown: {string.Join("; ", x.List.Shown())}");
             Line($"{name}: list info line: {Text(x, l => l.Info)}");
             yield return Shot("list");
+
+            // 2b. The shops, at the first kiosk (a Discord report, 2026-11-03: a coach set the wallet
+            //     couldn't cover gave a refusal cut off at the info line's edge). With $1,000, a coach
+            //     set is refused at once on the info screen, in full: the price, the cash, and how much
+            //     is short; any button goes back to the shop. With plenty, a locomotive is bought
+            //     through the confirm screen, and its result is shown in full too.
+            var info = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
+            var inventory = SingletonBehaviour<DV.InventorySystem.Inventory>.Instance;
+            if (!shopsChecked && info != null && inventory != null)
+            {
+                shopsChecked = true;
+                var cash = inventory.PlayerMoney;
+                IEnumerator To(string id)
+                {
+                    var target = x.List.Entries.ToList().FindIndex(e => e.Id == id);
+                    var at = x.List.IndexOfFirstDisplayedEntry + x.List.CurrentSelection;
+                    if (target >= 0 && target != at)
+                        yield return Press(target > at ? InputAction.Down : InputAction.Up, Math.Abs(target - at));
+                }
+                string Paragraph() => $"'{info.title.text}' / '{info.paragraph.text.Replace("\n", " | ")}' (overflowing {info.paragraph.isTextOverflowing})";
+
+                inventory.SetMoney(1_000);
+                yield return To(Runtime.RuntimeDesk.CoachShopId);
+                yield return Press(InputAction.Confirm);
+                Line($"{name}: coach shop: {string.Join("; ", x.Detail.Shown())}; info {Text(x, l => l.Info)}");
+                yield return Press(InputAction.Confirm);
+                Line($"{name}: a coach set with $1,000: screen {kiosk.CurrentScreen?.GetType().Name}: {Paragraph()}");
+                if (!ReferenceEquals(kiosk.CurrentScreen, info) || !info.paragraph.text.Contains("Not enough money")
+                    || !info.paragraph.text.Contains("You have $1,000") || info.paragraph.isTextOverflowing)
+                    Problem($"{name}: a coach set the wallet can't cover was not refused in full on the info screen");
+                yield return Shot("shop-short");
+                yield return Press(InputAction.Confirm);
+                if (!ReferenceEquals(kiosk.CurrentScreen, x.Detail))
+                    Problem($"{name}: the refusal did not go back to the shop (screen {kiosk.CurrentScreen?.GetType().Name})");
+                yield return Press(InputAction.Cancel);
+
+                inventory.SetMoney(10_000_000);
+                yield return To(Runtime.RuntimeDesk.ShopId);
+                yield return Press(InputAction.Confirm);
+                var firstRow = x.Detail.Shown().FirstOrDefault();
+                Line($"{name}: locomotive shop, first row {firstRow}; info {Text(x, l => l.Info)}");
+                yield return Press(InputAction.Confirm);
+                Line($"{name}: buying: confirm screen '{ask.title.text}' / '{ask.infoLine.text}' (overflowing {ask.infoLine.isTextOverflowing})");
+                if (!ReferenceEquals(kiosk.CurrentScreen, ask))
+                    Problem($"{name}: buying a locomotive did not ask first");
+                yield return Press(InputAction.Confirm);
+                var spent = 10_000_000 - inventory.PlayerMoney;
+                Line($"{name}: bought: screen {kiosk.CurrentScreen?.GetType().Name}: {Paragraph()}; ${spent:N0} spent");
+                if (!ReferenceEquals(kiosk.CurrentScreen, info) || info.paragraph.isTextOverflowing
+                    || !(info.paragraph.text.Contains(" paid. You have $") && spent > 0 || info.paragraph.text.Contains("Nothing was paid") && spent < 1))
+                    Problem($"{name}: the purchase's result was not shown in full on the info screen, as paid");
+                yield return Shot("shop-bought");
+                yield return Press(InputAction.Confirm);
+                if (!ReferenceEquals(kiosk.CurrentScreen, x.Detail))
+                    Problem($"{name}: the purchase's result did not go back to the shop (screen {kiosk.CurrentScreen?.GetType().Name})");
+                yield return Press(InputAction.Cancel);
+                inventory.SetMoney(cash);
+                if (!ReferenceEquals(kiosk.CurrentScreen, x.List))
+                    Problem($"{name}: cancel from a shop did not go back to the list");
+            }
             // 3. The first offer, taken at level 2 through the confirm screen. The offers come after
             //    the shops and the player's contracts (D22).
             var first = x.List.Entries.ToList().FindIndex(e => e.IsOffer && Runtime.RuntimeDesk.ShopOf(e.Id) == null);
@@ -223,9 +284,11 @@ namespace Contracts.Mod.Spike
                 yield return Shot("offer");
                 yield return Press(InputAction.Down);
                 yield return Press(InputAction.Confirm);
-                Line($"{name}: confirm screen: {kiosk.CurrentScreen?.GetType().Name}: '{ask.title.text}' / '{ask.infoLine.text}'");
+                Line($"{name}: confirm screen: {kiosk.CurrentScreen?.GetType().Name}: '{ask.title.text}' / '{ask.infoLine.text}' (overflowing {ask.infoLine.isTextOverflowing})");
                 if (!ReferenceEquals(kiosk.CurrentScreen, ask))
                     Problem($"{name}: taking did not ask first");
+                if (ask.infoLine.isTextOverflowing || !ask.infoLine.text.Contains("06:00"))
+                    Problem($"{name}: taking a contract did not say, in full, when its cars come");
                 yield return Shot("confirm");
                 // Cancel first: back on the offer, nothing taken.
                 yield return Press(InputAction.Cancel);
@@ -266,6 +329,8 @@ namespace Contracts.Mod.Spike
             yield return Press(InputAction.Confirm);
             var own = x.Detail.Contract;
             Line($"{name}: own contract '{own?.Short}': title {Text(x, l => l.Title)}; {string.Join("; ", x.Detail.Shown())}; info {Text(x, l => l.Info)}");
+            if (own != null && !own.IsOffer && own.Level < 1 && !Text(x, l => l.Info).Contains("Starts at midnight"))
+                Problem($"{name}: a contract not yet started does not say when it starts and its cars come");
             yield return Shot("mine");
             if (own == null || own.IsOffer)
                 Problem($"{name}: the last entry is not the player's contract");

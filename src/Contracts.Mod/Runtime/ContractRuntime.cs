@@ -275,9 +275,14 @@ namespace Contracts.Mod.Runtime
                 c.History.Clear();
                 c.Closed.Clear();
             }
-            // The kiosk says what dropped, the next time its Contracts list opens.
+            // The kiosk says what dropped, the next time its Contracts list opens, on its one line:
+            // by name if that fits, else how many.
             if (changes.Count > 0)
-                Kiosk.KioskMenu.Tell(charged > 0.0 ? $"{string.Join(", ", changes)}: -${charged:N0}" : string.Join(", ", changes));
+            {
+                var cost = charged > 0.0 ? $": -${charged:N0}" : "";
+                var named = string.Join(", ", changes) + cost;
+                Kiosk.KioskMenu.Tell(named.Length <= Kiosk.KioskMenu.InfoLineChars ? named : $"{changes.Count} contracts dropped{cost}");
+            }
         }
 
         /// <summary>Whether a car's bill counts for a contract: the one it is billed to, or the industry it goes to.</summary>

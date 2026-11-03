@@ -46,12 +46,9 @@ namespace Contracts.Mod.Kiosk
             if (desk == null)
                 return;
             // The shops come first (owner, 2026-11-01: "Trains will need to be purchasable";
-            // 2026-11-02: "where do we buy coaches?").
-            if (!Runtime.RuntimeDesk.IsStandIn(desk))
-            {
-                entries.Add(new ContractView { Id = Runtime.RuntimeDesk.ShopId, Short = "Buy locomotives", IsOffer = false });
-                entries.Add(new ContractView { Id = Runtime.RuntimeDesk.CoachShopId, Short = "Buy coaches", IsOffer = false });
-            }
+            // 2026-11-02: "where do we buy coaches?"), with the spike's stand-in desk too.
+            entries.Add(new ContractView { Id = Runtime.RuntimeDesk.ShopId, Short = "Buy locomotives", IsOffer = false });
+            entries.Add(new ContractView { Id = Runtime.RuntimeDesk.CoachShopId, Short = "Buy coaches", IsOffer = false });
             entries.AddRange(desk.Mine());
             var offered = desk.Offers(place);
             offers = offered.Count;

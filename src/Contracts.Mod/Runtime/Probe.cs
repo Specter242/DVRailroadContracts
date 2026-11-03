@@ -237,12 +237,17 @@ namespace Contracts.Mod.Runtime
             {
                 inventory.AddMoney(item.Price + 1000f);
                 var money = inventory.PlayerMoney;
-                var before = SingletonBehaviour<CarSpawner>.Instance.AllCars.Count;
+                var existing = new HashSet<TrainCar>(SingletonBehaviour<CarSpawner>.Instance.AllCars);
+                var before = existing.Count;
                 var message = LocoShop.Buy(item, place);
                 var after = SingletonBehaviour<CarSpawner>.Instance.AllCars.Count;
-                Line($"shop: bought {item.Name} at {place.Id}: {message}; money {money:N0} -> {inventory.PlayerMoney:N0}; cars +{after - before}");
+                var added = SingletonBehaviour<CarSpawner>.Instance.AllCars.Where(c => !existing.Contains(c)).ToList();
+                Line($"shop: bought {item.Name} at {place.Id}: {message.Replace("\n", " ")}; money {money:N0} -> {inventory.PlayerMoney:N0}; cars +{after - before}");
                 if (Math.Abs(money - item.Price - inventory.PlayerMoney) > 1.0 || after - before != item.Cars.Count)
                     Problem($"{item.Name} was not paid for or not delivered whole");
+                // Whatever is bought arrives at an interchange, as every car does (owner, 2026-11-03).
+                if (added.Any(c => !InterchangeYards.IsInterchangeTrack(c.logicCar?.FrontBogieTrack)))
+                    Problem($"{item.Name} was delivered off the interchanges: {string.Join(", ", added.Select(c => c.logicCar?.FrontBogieTrack?.ID?.FullDisplayID))}");
             }
         }
 

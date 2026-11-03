@@ -25,7 +25,10 @@ namespace Contracts.Mod.Kiosk
 
         private static string message;
 
-        /// <summary>A result to show once on the Contracts list's info line, such as a purchase's.</summary>
+        /// <summary>The characters the Contracts list's info line holds: it doesn't wrap, and clips at the screen's edge.</summary>
+        public const int InfoLineChars = 37;
+
+        /// <summary>A short notice to show once on the Contracts list's info line, such as what dropped at midnight (at most <see cref="InfoLineChars"/>).</summary>
         public static void Tell(string text) => message = text;
 
         public static string TakeMessage()
@@ -75,7 +78,7 @@ namespace Contracts.Mod.Kiosk
             var list = screens.AddComponent<ContractsScreen>();
             var detail = screens.AddComponent<ContractScreen>();
             list.Init(kiosk, main, detail, lines);
-            detail.Init(kiosk, list, choice, lines);
+            detail.Init(kiosk, list, choice, info, lines);
             extensions.Add(main, new Extension { Line = line, List = list, Detail = detail });
         }
 

@@ -20,11 +20,16 @@ namespace Contracts.Mod.Kiosk
         {
             public string Label, Value, Ask;
             public Action Do;
+            // An action whose result is a message for the player (a purchase), shown in full on the
+            // kiosk's info screen; and a reason a row can't be done, too long for the info line.
+            public Func<string> Act;
+            public string Explain;
         }
 
         private DisplayScreenSwitcher kiosk;
         private ContractsScreen list;
         private CareerManagerCustomActionChoiceScreen confirm;
+        private CareerManagerInfoScreen info;
         private KioskLines lines;
         private ContractView contract;
         private readonly List<Choice> choices = new List<Choice>();
@@ -32,11 +37,12 @@ namespace Contracts.Mod.Kiosk
         public ContractView Contract => contract;
         protected override int TotalSlotCount => choices.Count;
 
-        internal void Init(DisplayScreenSwitcher kiosk, ContractsScreen list, CareerManagerCustomActionChoiceScreen confirm, KioskLines lines)
+        internal void Init(DisplayScreenSwitcher kiosk, ContractsScreen list, CareerManagerCustomActionChoiceScreen confirm, CareerManagerInfoScreen info, KioskLines lines)
         {
             this.kiosk = kiosk;
             this.list = list;
             this.confirm = confirm;
+            this.info = info;
             this.lines = lines;
             scrollUpArrow = lines.ArrowUp;
             scrollDownArrow = lines.ArrowDown;
@@ -60,16 +66,20 @@ namespace Contracts.Mod.Kiosk
                 return;
             if (Runtime.RuntimeDesk.ShopOf(contract.Id) is Runtime.LocoShop.Kind kind)
             {
+                // A purchase's result, or why it can't be made, goes on the kiosk's info screen in
+                // full (a Discord report, 2026-11-03: the refusal ran past the info line's edge).
                 var place = list.Place;
                 foreach (var item in Runtime.LocoShop.Catalogue(kind))
                 {
                     var it = item;
-                    choices.Add(new Choice
-                    {
-                        Label = it.Name, Value = $"${it.Price:N0}",
-                        Ask = $"Buy {it.Name} for ${it.Price:N0}? It is delivered here at once.",
-                        Do = () => KioskMenu.Tell(Runtime.LocoShop.Buy(it, place)),
-                    });
+                    choices.Add(Runtime.LocoShop.Money < it.Price
+                        ? new Choice { Label = it.Name, Value = $"${it.Price:N0}", Explain = Runtime.LocoShop.ShortOf(it) }
+                        : new Choice
+                        {
+                            Label = it.Name, Value = $"${it.Price:N0}",
+                            Ask = Runtime.LocoShop.AskToBuy(it, place),
+                            Act = () => Runtime.LocoShop.Buy(it, place),
+                        });
                 }
                 return;
             }
@@ -87,7 +97,10 @@ namespace Contracts.Mod.Kiosk
                         : new Choice
                         {
                             Label = $"Take at level {l}", Value = desk.Volume(contract, l),
-                            Ask = $"Take {contract.Short} at level {l}? It starts at midnight.",
+                            Ask = $"Take {contract.Short} at level {l}? It starts at midnight. " +
+                                  (Runtime.RuntimeDesk.IsPassenger(contract.Id)
+                                      ? "From 06:00 the next morning its trains run to the timetable, with coaches you own."
+                                      : "From 06:00 the next morning its cars come and go through the interchanges, with their jobs."),
                             Do = () => desk.Take(contract, l),
                         });
                 }
@@ -160,6 +173,8 @@ namespace Contracts.Mod.Kiosk
             lines.Info.text = contract == null || KioskMenu.Desk == null ? ""
                 : contract.Needs != null ? contract.Needs
                 : contract.IsOffer ? KioskMenu.Desk.Legend(contract)
+                // Not started yet: when its cars come (a contract's work starts at the first service after its first midnight).
+                : contract.Level < 1 ? (Runtime.RuntimeDesk.IsPassenger(contract.Id) ? "Starts at midnight; trains from 06:00" : "Starts at midnight; cars from 06:00")
                 : Runtime.RuntimeDesk.IsPassenger(contract.Id) ? $"{KioskMenu.Desk.Volume(contract, contract.RequestedLevel)} a day, {contract.OpenWaybills} open"
                 : $"{KioskMenu.Desk.Volume(contract, contract.RequestedLevel)} a day, {contract.OpenWaybills} open, {contract.OnOrder} ordered";
         }
@@ -186,17 +201,33 @@ namespace Contracts.Mod.Kiosk
                     break;
                 case InputAction.Confirm when selector.HasElements:
                     var choice = choices[IndexOfFirstDisplayedEntry + selector.Current];
-                    if (choice.Do == null)
+                    if (choice.Explain != null)
+                    {
+                        // Not available, for a reason too long for the info line: the info screen says it in full.
+                        KioskMenu.ShowInfo(info, this, choice.Label, choice.Explain);
+                        kiosk.SetActiveDisplay(info);
+                        break;
+                    }
+                    if (choice.Do == null && choice.Act == null)
                     {
                         // Not available: say why on the info line.
                         lines.Info.text = choice.Ask;
                         break;
                     }
-                    // Cancel on the confirm screen comes back here; confirm acts, then shows the list.
+                    // Cancel on the confirm screen comes back here. Confirm acts, then shows the list, or
+                    // for an action with a result (a purchase), the result in full and then this screen.
                     confirm.SetCustomActionData(() =>
                     {
-                        choice.Do();
-                        confirm.OverrideReturnScreen(list);
+                        if (choice.Act != null)
+                        {
+                            KioskMenu.ShowInfo(info, this, choice.Label, choice.Act());
+                            confirm.OverrideReturnScreen(info);
+                        }
+                        else
+                        {
+                            choice.Do();
+                            confirm.OverrideReturnScreen(list);
+                        }
                     }, this, choice.Label, choice.Ask);
                     kiosk.SetActiveDisplay(confirm);
                     break;
