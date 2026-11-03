@@ -1,0 +1,228 @@
+using System;
+using System.Linq;
+using System.Runtime.CompilerServices;
+using DV.ServicePenalty.UI;
+using HarmonyLib;
+using TMPro;
+using UnityEngine;
+
+namespace Contracts.Mod.Kiosk
+{
+    /// <summary>
+    /// The Contracts entry in every career manager kiosk's main menu (design D9).
+    ///
+    /// The kiosk's display has more text lines than its main menu uses: the menu writes four
+    /// (fees, licences, owned vehicles, stats) down one column, and the line below Stats is
+    /// free on that screen. Contracts goes there, as a fifth entry of the same menu, so it is
+    /// selected and highlighted like the stock four. Confirming it opens the Contracts list,
+    /// one of two screens the mod adds beside the stock ones. A kiosk whose display has no
+    /// such line keeps its stock menu.
+    /// </summary>
+    internal static class KioskMenu
+    {
+        public const string Entry = "Contracts";
+        public static IContractDesk Desk;
+
+        private static string message;
+
+        /// <summary>A result to show once on the Contracts list's info line, such as a purchase's.</summary>
+        public static void Tell(string text) => message = text;
+
+        public static string TakeMessage()
+        {
+            var m = message;
+            message = null;
+            return m;
+        }
+
+        internal sealed class Extension
+        {
+            public TextMeshPro Line;
+            public ContractsScreen List;
+            public ContractScreen Detail;
+        }
+
+        private static readonly ConditionalWeakTable<CareerManagerMainScreen, Extension> extensions =
+            new ConditionalWeakTable<CareerManagerMainScreen, Extension>();
+
+        public static bool TryGet(CareerManagerMainScreen main, out Extension extension) =>
+            extensions.TryGetValue(main, out extension);
+
+        internal static void Extend(CareerManagerMainScreen main)
+        {
+            var kiosk = main.screenSwitcher;
+            var t = Traverse.Create(main);
+            var selectable = t.Field("selectableText").GetValue<TextMeshPro[]>();
+            if (kiosk == null || selectable == null || selectable.Length != 4 || main.fees == null || main.stats == null)
+            {
+                Main.Warn($"kiosk {Where(kiosk)}: main menu not as expected; Contracts left out");
+                return;
+            }
+            var line = LineBelow(kiosk, main.fees, main.stats, selectable);
+            var lines = KioskLines.From(kiosk);
+            var choice = kiosk.GetComponentInChildren<CareerManagerCustomActionChoiceScreen>(true);
+            var info = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
+            if (line == null || lines == null || choice == null || info == null)
+            {
+                Main.Warn($"kiosk {Where(kiosk)}: {(line == null ? "no free line below Stats" : "screens not as expected")}; Contracts left out");
+                return;
+            }
+            t.Field("selectableText").SetValue(selectable.Concat(new[] { line }).ToArray());
+            t.Field("selector").SetValue(new IntIterator(0, 5, isWrappable: true));
+            t.Field("activeSlotCount").SetValue(5);
+            var screens = new GameObject("Contracts");
+            screens.transform.SetParent(main.transform.parent, false);
+            var list = screens.AddComponent<ContractsScreen>();
+            var detail = screens.AddComponent<ContractScreen>();
+            list.Init(kiosk, main, detail, lines);
+            detail.Init(kiosk, list, choice, lines);
+            extensions.Add(main, new Extension { Line = line, List = list, Detail = detail });
+        }
+
+        /// <summary>
+        /// The next line down the main menu's column, after Stats: the stock entries are evenly
+        /// spaced, so it lies one step below Stats, in the same column.
+        /// </summary>
+        private static TextMeshPro LineBelow(DisplayScreenSwitcher kiosk, TextMeshPro first, TextMeshPro last, TextMeshPro[] used)
+        {
+            Vector3 At(Component c) => kiosk.transform.InverseTransformPoint(c.transform.position);
+            var step = (At(last) - At(first)) / 3f;
+            if (step.magnitude < 1e-4f)
+                return null;
+            var target = At(last) + step;
+            return kiosk.allTextFields
+                .Where(f => f != null && !used.Contains(f) && f.transform.parent == last.transform.parent)
+                .Select(f => (Field: f, Off: (At(f) - target).magnitude))
+                .Where(c => c.Off < step.magnitude * 0.25f)
+                .OrderBy(c => c.Off)
+                .Select(c => c.Field)
+                .FirstOrDefault();
+        }
+
+        internal static void Open(CareerManagerMainScreen main, Extension extension)
+        {
+            if (Multiplayer.IsClient)
+            {
+                ShowInfo(main.infoScreen, main, Entry, "Contracts are managed by the host.");
+                main.screenSwitcher.SetActiveDisplay(main.infoScreen);
+                return;
+            }
+            main.screenSwitcher.SetActiveDisplay(extension.List);
+        }
+
+        private static readonly System.Reflection.MethodInfo SetInfo = AccessTools.Method(typeof(CareerManagerInfoScreen), "SetInfoData",
+            new[] { typeof(IDisplayScreen), typeof(string), typeof(string), typeof(string), typeof(string), typeof(string), typeof(string), typeof(Action) });
+
+        internal static void ShowInfo(CareerManagerInfoScreen screen, IDisplayScreen back, string title, string paragraph) =>
+            SetInfo?.Invoke(screen, new object[] { back, title, paragraph, "", "", "", "", null });
+
+        internal static string Where(Component c)
+        {
+            if (c == null)
+                return "?";
+            var t = c.transform;
+            while (t.parent != null && t.parent.name != "Offices_w3" && t.parent.name != "Offices")
+                t = t.parent;
+            return t.name;
+        }
+    }
+
+    [HarmonyPatch(typeof(CareerManagerMainScreen), "Awake")]
+    internal static class MainScreenAwake
+    {
+        private static void Postfix(CareerManagerMainScreen __instance)
+        {
+            try
+            {
+                KioskMenu.Extend(__instance);
+            }
+            catch (Exception e)
+            {
+                Main.Error($"kiosk {KioskMenu.Where(__instance)}: adding Contracts failed: {e}");
+            }
+        }
+    }
+
+    [HarmonyPatch(typeof(CareerManagerMainScreen), nameof(CareerManagerMainScreen.Activate))]
+    internal static class MainScreenActivate
+    {
+        private static void Postfix(CareerManagerMainScreen __instance)
+        {
+            if (!KioskMenu.TryGet(__instance, out var x))
+                return;
+            x.Line.text = KioskMenu.Entry;
+            x.Line.color = __instance.CurrentSelection == 4 ? __instance.screenSwitcher.HIGHLIGHTED_COLOR : __instance.screenSwitcher.REGULAR_COLOR;
+        }
+    }
+
+    [HarmonyPatch(typeof(CareerManagerMainScreen), nameof(CareerManagerMainScreen.Disable))]
+    internal static class MainScreenDisable
+    {
+        private static void Postfix(CareerManagerMainScreen __instance)
+        {
+            if (KioskMenu.TryGet(__instance, out var x))
+                x.Line.text = string.Empty;
+        }
+    }
+
+    [HarmonyPatch(typeof(CareerManagerMainScreen), nameof(CareerManagerMainScreen.HandleInputAction))]
+    internal static class MainScreenInput
+    {
+        private static bool Prefix(CareerManagerMainScreen __instance, InputAction input)
+        {
+            if (input != InputAction.Confirm || __instance.CurrentSelection != 4 || !KioskMenu.TryGet(__instance, out var x))
+                return true;
+            KioskMenu.Open(__instance, x);
+            return false;
+        }
+    }
+
+    [HarmonyPatch(typeof(CareerManagerMainScreen), nameof(CareerManagerMainScreen.GetCurrentSelection))]
+    internal static class MainScreenSelection
+    {
+        private static bool Prefix(CareerManagerMainScreen __instance, ref string __result)
+        {
+            if (__instance.CurrentSelection != 4 || !KioskMenu.TryGet(__instance, out _))
+                return true;
+            __result = KioskMenu.Entry;
+            return false;
+        }
+    }
+
+    /// <summary>The Multiplayer mod's state, through its public API, if it is loaded.</summary>
+    internal static class Multiplayer
+    {
+        public static bool IsClient
+        {
+            get
+            {
+                try
+                {
+                    var api = AccessTools.TypeByName("MPAPI.MultiplayerAPI");
+                    var face = AccessTools.TypeByName("MPAPI.IMultiplayerAPI");
+                    var instance = api?.GetProperty("Instance")?.GetValue(null);
+                    if (instance == null || face == null)
+                        return false;
+                    var connected = face.GetProperty("IsConnected")?.GetValue(instance) as bool? ?? false;
+                    var host = face.GetProperty("IsHost")?.GetValue(instance) as bool? ?? false;
+                    return connected && !host;
+                }
+                catch (Exception)
+                {
+                    return false;
+                }
+            }
+        }
+
+        public static string Describe()
+        {
+            var api = AccessTools.TypeByName("MPAPI.MultiplayerAPI");
+            var face = AccessTools.TypeByName("MPAPI.IMultiplayerAPI");
+            var instance = api?.GetProperty("Instance")?.GetValue(null);
+            if (instance == null || face == null)
+                return api == null ? "not loaded" : "loaded, no instance";
+            return string.Join(", ", new[] { "IsConnected", "IsHost", "IsSinglePlayer" }
+                .Select(p => $"{p} {face.GetProperty(p)?.GetValue(instance)}"));
+        }
+    }
+}

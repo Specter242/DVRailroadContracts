@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Engine-free operations model: no UnityEngine, game, or JSON library
+       references belong here, so the model stays unit testable and the
+       runtime never depends on a second Newtonsoft.Json. -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <RootNamespace>Contracts.Core</RootNamespace>
+  </PropertyGroup>
+
+</Project>

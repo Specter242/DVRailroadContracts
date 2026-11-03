@@ -1,0 +1,60 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The runtime mod (Unity Mod Manager). So far: the career manager kiosk's
+       Contracts menu (design D9, spike S6), fed by a spike data source.
+       Ships with Contracts.Core.dll beside it. -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>Contracts</AssemblyName>
+    <RootNamespace>Contracts.Mod</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <!-- Development tools (the kiosk spike and its stand-in desk, the runtime probe) are built by
+       default; scripts/package.sh builds with -p:DevTools=false, leaving them out of a release. -->
+  <PropertyGroup>
+    <DevTools Condition="'$(DevTools)' == ''">true</DevTools>
+    <DefineConstants Condition="'$(DevTools)' == 'true'">$(DefineConstants);DEVTOOLS</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(DevTools)' != 'true'">
+    <Compile Remove="Spike/**" />
+    <Compile Remove="Runtime/Probe.cs" />
+  </ItemGroup>
+
+  <!-- Game and loader assemblies are referenced in place and never copied. -->
+  <ItemGroup>
+    <Reference Include="0Harmony" HintPath="$(DvModManagerDir)/0Harmony.dll" Private="false" />
+    <Reference Include="UnityModManager" HintPath="$(DvModManagerDir)/UnityModManager.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(DvManagedDir)/Assembly-CSharp.dll" Private="false" />
+    <Reference Include="DV.Common" HintPath="$(DvManagedDir)/DV.Common.dll" Private="false" />
+    <Reference Include="DV.Localization" HintPath="$(DvManagedDir)/DV.Localization.dll" Private="false" />
+    <Reference Include="DV.ThingTypes" HintPath="$(DvManagedDir)/DV.ThingTypes.dll" Private="false" />
+    <Reference Include="DV.UserManagement" HintPath="$(DvManagedDir)/DV.UserManagement.dll" Private="false" />
+    <Reference Include="DV.Utils" HintPath="$(DvManagedDir)/DV.Utils.dll" Private="false" />
+    <Reference Include="Unity.TextMeshPro" HintPath="$(DvManagedDir)/Unity.TextMeshPro.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(DvManagedDir)/UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(DvManagedDir)/UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ScreenCaptureModule" HintPath="$(DvManagedDir)/UnityEngine.ScreenCaptureModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UI" HintPath="$(DvManagedDir)/UnityEngine.UI.dll" Private="false" />
+    <Reference Include="DV.Inventory" HintPath="$(DvManagedDir)/DV.Inventory.dll" Private="false" />
+    <Reference Include="DV.WeatherSystem" HintPath="$(DvManagedDir)/DV.WeatherSystem.dll" Private="false" />
+    <Reference Include="DV.RailTrack" HintPath="$(DvManagedDir)/DV.RailTrack.dll" Private="false" />
+    <Reference Include="DV.PointSet" HintPath="$(DvManagedDir)/DV.PointSet.dll" Private="false" />
+    <Reference Include="Newtonsoft.Json" HintPath="$(DvManagedDir)/Newtonsoft.Json.dll" Private="false" />
+    <Reference Include="DV.OriginShiftInfo" HintPath="$(DvManagedDir)/DV.OriginShiftInfo.dll" Private="false" />
+    <Reference Include="net.smkd.vector3d" HintPath="$(DvManagedDir)/net.smkd.vector3d.dll" Private="false" />
+    <Reference Include="WorldStreamer" HintPath="$(DvManagedDir)/WorldStreamer.dll" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Contracts.Core/Contracts.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Info.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
