@@ -75,8 +75,10 @@ namespace Contracts.Mod.Kiosk
             lines.Title.text = place == null ? KioskMenu.Entry : $"{KioskMenu.Entry}: {place.Name}";
             var mine = entries.Count(e => !e.IsOffer && Runtime.RuntimeDesk.ShopOf(e.Id) == null);
             var message = KioskMenu.TakeMessage();
+            var owed = KioskMenu.Desk?.Owed ?? 0.0;
             lines.Info.text = message ?? KioskMenu.Desk?.Notice
-                              ?? (offers + mine == 0 ? "No contracts on offer" : $"{mine} yours, {offers} on offer");
+                              ?? (owed >= 1.0 ? $"Owed ${owed:N0}; {mine} yours, {offers} on offer"
+                                  : offers + mine == 0 ? "No contracts on offer" : $"{mine} yours, {offers} on offer");
         }
 
         public override void Disable()

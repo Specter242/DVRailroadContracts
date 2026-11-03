@@ -77,6 +77,7 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("service")] public int ServiceDay = -1;    // the contract day of the last 06:00 service
         [JsonProperty("contracts")] public List<HeldContract> Contracts = new List<HeldContract>();
         [JsonProperty("waybills")] public List<Waybill> Waybills = new List<Waybill>();
+        [JsonProperty("owed")] public double Owed;              // penalties not yet taken from the wallet (ContractPay)
 
         [JsonIgnore] private Dictionary<string, Waybill> byGuid;
 

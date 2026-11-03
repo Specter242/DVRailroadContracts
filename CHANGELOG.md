@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.2 (2026-11-03)
+
+- Quick-delivery bonus: from level 2, a contract job done within a day of its waybill pays 4, 6, 8 or 10% more (half on the second day, a quarter on the third), printed with the job's pay.
+- Lowering or ending a contract costs a penalty, shown at the kiosk before you confirm. Three poor days in a row take a contract down two levels, with the penalty; a level 1 or 2 contract ends. A penalty your wallet can't cover is owed and taken as cash comes in.
+
 ## 0.1.1 (2026-11-03)
 
 - Unity Mod Manager now checks for new versions and can install them.

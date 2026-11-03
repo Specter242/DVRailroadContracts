@@ -205,13 +205,17 @@ namespace Contracts.Mod.Spike
             Line($"{name}: list '{x.List.Place?.Id}': {x.List.Entries.Count} entries; shown: {string.Join("; ", x.List.Shown())}");
             Line($"{name}: list info line: {Text(x, l => l.Info)}");
             yield return Shot("list");
-            // 3. The first offer, taken at level 2 through the confirm screen. A kiosk whose offers
-            //    the player has all taken elsewhere lists only the player's contracts.
-            var hasOffer = x.List.Entries.Count > 0 && x.List.Entries[0].IsOffer;
+            // 3. The first offer, taken at level 2 through the confirm screen. The offers come after
+            //    the shops and the player's contracts (D22).
+            var first = x.List.Entries.ToList().FindIndex(e => e.IsOffer && Runtime.RuntimeDesk.ShopOf(e.Id) == null);
+            var hasOffer = first >= 0;
             ContractView taken = null;
             if (hasOffer)
             {
-                var offer = x.List.Entries[0];
+                var offer = x.List.Entries[first];
+                var from = x.List.IndexOfFirstDisplayedEntry + x.List.CurrentSelection;
+                if (first != from)
+                    yield return Press(first > from ? InputAction.Down : InputAction.Up, Math.Abs(first - from));
                 yield return Press(InputAction.Confirm);
                 Line($"{name}: offer '{x.Detail.Contract?.Short}': {string.Join("; ", x.Detail.Shown())}");
                 if (!ReferenceEquals(kiosk.CurrentScreen, x.Detail))
@@ -247,11 +251,18 @@ namespace Contracts.Mod.Spike
                 }
             }
 
-            // 4. The player's newest contract (the last entry: up from the top wraps to it). One just
-            //    taken here is raised to level 3; otherwise it is ended, and is offered again.
-            yield return Press(InputAction.Up);
+            // 4. The player's newest contract: the one just taken here, else the last of theirs (the
+            //    list holds the shops, then the player's contracts, then every offer: D22). One just
+            //    taken here has not started, so it can't be raised yet (D16): its first row lowers it
+            //    to level 1. Otherwise it is ended, and is offered again where the desk offers it.
+            var listed = x.List.Entries.ToList();
+            var target = taken != null ? listed.FindIndex(e => !e.IsOffer && e.Id == taken.Id)
+                : listed.FindLastIndex(e => !e.IsOffer && Runtime.RuntimeDesk.ShopOf(e.Id) == null);
+            var at = x.List.IndexOfFirstDisplayedEntry + x.List.CurrentSelection;
+            if (target >= 0 && target != at)
+                yield return Press(target > at ? InputAction.Down : InputAction.Up, Math.Abs(target - at));
             var last = x.List.IndexOfFirstDisplayedEntry + x.List.CurrentSelection;
-            Line($"{name}: up from the top selects entry {last} of {x.List.Entries.Count}: {x.List.Entries[last].Short}");
+            Line($"{name}: the player's newest contract is entry {target}; selected entry {last} of {x.List.Entries.Count}: {x.List.Entries[last].Short}");
             yield return Press(InputAction.Confirm);
             var own = x.Detail.Contract;
             Line($"{name}: own contract '{own?.Short}': title {Text(x, l => l.Title)}; {string.Join("; ", x.Detail.Shown())}; info {Text(x, l => l.Info)}");
@@ -260,24 +271,27 @@ namespace Contracts.Mod.Spike
                 Problem($"{name}: the last entry is not the player's contract");
             else if (taken != null)
             {
-                yield return Press(InputAction.Confirm);   // "Raise to level 3"
+                if (x.Detail.Shown().Any(r => r.StartsWith("Raise", StringComparison.Ordinal)))
+                    Problem($"{name}: a contract not yet started offers a raise");
+                yield return Press(InputAction.Confirm);   // "Lower to level 1"
                 yield return Press(InputAction.Confirm);
-                Line($"{name}: after raising: asking {taken.RequestedLevel}; list: {string.Join("; ", x.List.Shown())}");
-                if (taken.RequestedLevel != 3)
-                    Problem($"{name}: raising did not ask for level 3");
+                Line($"{name}: after lowering: asking {taken.RequestedLevel}; list: {string.Join("; ", x.List.Shown())}");
+                if (taken.RequestedLevel != 1)
+                    Problem($"{name}: lowering did not ask for level 1");
             }
             else
             {
-                yield return Press(InputAction.Up);        // the last row, "End contract"
+                yield return Press(InputAction.Up, 2);     // past the last row (the quick-delivery bonus) to "End contract"
                 yield return Press(InputAction.Confirm);
                 Line($"{name}: confirm screen: '{ask.title.text}' / '{ask.infoLine.text}'");
                 yield return Shot("end");
                 yield return Press(InputAction.Confirm);
                 var gone = !KioskMenu.Desk.Mine().Contains(own);
                 var again = x.List.Entries.Any(e => e.IsOffer && e.Id == own.Id);
-                Line($"{name}: after ending: {(gone ? "gone" : "still held")}; offered here again: {again}; screen {kiosk.CurrentScreen?.GetType().Name}; list: {string.Join("; ", x.List.Shown())}");
-                if (!gone || !again || !ReferenceEquals(kiosk.CurrentScreen, x.List))
-                    Problem($"{name}: ending did not give the contract up and offer it again here");
+                var offeredHere = KioskMenu.Desk.Offers(x.List.Place).Any(o => o.Id == own.Id);
+                Line($"{name}: after ending: {(gone ? "gone" : "still held")}; offered here again: {again} (the desk offers it here: {offeredHere}); screen {kiosk.CurrentScreen?.GetType().Name}; list: {string.Join("; ", x.List.Shown())}");
+                if (!gone || again != offeredHere || !ReferenceEquals(kiosk.CurrentScreen, x.List))
+                    Problem($"{name}: ending did not give the contract up and list it as the desk offers it");
                 yield return Shot("ended");
             }
 

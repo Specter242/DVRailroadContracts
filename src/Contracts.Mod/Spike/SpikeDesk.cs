@@ -119,6 +119,11 @@ namespace Contracts.Mod.Spike
             Main.Log($"spike desk: ended {contract.Id}");
         }
 
+        public double Penalty(ContractView contract, int target) =>
+            Contracts.Core.Industries.ContractTerms.Penalty(contract.Level, target, 0);
+
+        public double Owed => 0.0;
+
         public string Notice
         {
             get

@@ -45,6 +45,10 @@ namespace Contracts.Mod.Kiosk
         /// <summary>Null if the player's contract may be raised a level now; otherwise why not, for the info line.</summary>
         string RaiseBlocker(ContractView mine);
         void End(ContractView mine);
+        /// <summary>The penalty for taking the player's contract down to a level (0 ends it), at its history now (design D7).</summary>
+        double Penalty(ContractView mine, int target);
+        /// <summary>Penalties owed, not yet taken from the wallet.</summary>
+        double Owed { get; }
         /// <summary>A line for the Contracts menu, such as the day-duration notice; null for none.</summary>
         string Notice { get; }
     }

@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Contracts.Core.Industries;
 using Contracts.Mod.Kiosk;
 using DV;
 using DV.InventorySystem;
@@ -109,6 +110,7 @@ namespace Contracts.Mod.Runtime
             yield return new WaitForSeconds(2f);
             Try("jobs after the second service", () => JobsCheck(rt, taken));
             Try("standing", () => StandingCheck(rt, taken));
+            yield return PayCheck(rt, taken);
             Try("save round trip", () => SaveCheck(rt));
             yield return Finish();
         }
@@ -491,6 +493,162 @@ namespace Contracts.Mod.Runtime
             Line($"standing: raise asked, then a slow car: level {c.Level}, requested {c.Requested}, history [{string.Join(", ", c.History)}]");
             if (c.Level != level + 1 || c.Requested != c.Level)
                 Problem("a raise went through after the average fell under 90%");
+        }
+
+        /// <summary>
+        /// Pay on top (design D7; ContractTerms, ContractPay), on the taken contract at level 2: a
+        /// job of its cars done with fresh bills earns the quick-delivery bonus with its pay;
+        /// lowering costs the penalty at midnight; three poor days force two levels down with the
+        /// penalty; ending costs it at once, and what the wallet can't cover is owed, kept in the
+        /// save, and taken as cash comes in.
+        /// </summary>
+        private IEnumerator PayCheck(ContractRuntime rt, string id)
+        {
+            var c = id == null ? null : rt.State.Contracts.FirstOrDefault(x => x.Id == id);
+            if (c == null)
+            {
+                Problem("pay: no taken contract to check");
+                yield break;
+            }
+            if (c.Level < 2)
+                c.Level = c.Requested = 2;
+            var inventory = SingletonBehaviour<Inventory>.Instance;
+
+            // 1. The quick-delivery bonus, on a job done with fresh bills.
+            Job job = null;
+            List<TrainCar> jobCars = null;
+            string before = null;
+            Try("pay: a job to work", () =>
+            {
+                var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+                var jobs = SingletonBehaviour<JobsManager>.Instance;
+                List<TrainCar> Cars() => rt.State.Waybills.Where(w => w.Contract == id).Select(w => registry.GetTrainCarByCarGuid(w.Guid)).Where(t => t != null).ToList();
+                Job Pending(List<TrainCar> cars) => cars.Select(t => jobs.GetJobOfCar(t.logicCar))
+                    .FirstOrDefault(j => j != null && (j.State == JobState.Available || j.State == JobState.InProgress));
+                var all = Cars();
+                job = Pending(all);
+                if (job == null)
+                {
+                    Line("pay: no contract job pending; another service: " + rt.Service(serviceDay + 2));
+                    all = Cars();
+                    job = Pending(all);
+                }
+                if (job == null)
+                {
+                    Problem("pay: no contract job to work for the bonus");
+                    return;
+                }
+                jobCars = all.Where(t => jobs.GetJobOfCar(t.logicCar) == job).ToList();
+                foreach (var t in jobCars)
+                {
+                    var w = rt.State.Of(t.logicCar.carGuid);
+                    if (w != null)
+                        w.Opened = ContractRuntime.Clock;
+                }
+                before = Prepare(rt, job, jobCars);
+            });
+            if (job != null && before != null)
+            {
+                yield return new WaitForSeconds(0.5f);
+                Try("pay: the bonus", () =>
+                {
+                    var basePay = (double)job.GetBasePaymentForTheJob();
+                    var count = ContractRuntime.JobCars(job).Count(x => x != null);
+                    var open = jobCars.Count(t => rt.State.Of(t.logicCar.carGuid)?.Opened != null);
+                    var expected = count == 0 ? 0.0 : open * ContractTerms.Bonus(basePay / count, c.Level, 0.0);
+                    Line(Complete(rt, job, jobCars, before));
+                    var stock = job.GetJobCompletionTime() <= job.TimeLimit + 60f ? job.GetPotentialBonusPaymentForTheJob() : 0f;
+                    var paid = job.GetBonusPaymentForTheJob() - stock;
+                    var wage = job.GetWageForTheJob();
+                    Line($"pay: {job.ID} at level {c.Level}, {count} car(s), {open} with fresh bills: base ${basePay:N0}, time bonus ${stock:N0}, " +
+                         $"quick-delivery bonus ${paid:N0} (expected ${expected:N0}); wage ${wage:N0}");
+                    if (expected < 1.0)
+                        Problem("pay: the job had no bonus to earn");
+                    else if (Math.Abs(paid - expected) > 1.5)
+                        Problem("pay: the quick-delivery bonus paid is not the level's share of the job's base wage");
+                    if (Math.Abs(wage - (basePay + stock + paid)) > 1.5)
+                        Problem("pay: the job's wage does not carry the bonus");
+                });
+            }
+
+            // 2. Lowering costs the penalty when it takes effect at midnight.
+            Try("pay: lowering", () =>
+            {
+                foreach (var w in rt.State.Waybills)
+                    w.Opened = null;
+                c.Closed.Clear();   // nothing to score, so the history stays as it is
+                var view = KioskMenu.Desk.Mine().First(v => v.Id == id);
+                var from = c.Level;
+                var days = c.History.Count;
+                var quoted = KioskMenu.Desk.Penalty(view, from - 1);
+                var expected = ContractTerms.Penalty(from, from - 1, c.History.Count);
+                inventory.SetMoney(1_000_000);
+                KioskMenu.TakeMessage();
+                KioskMenu.Desk.RequestLevel(view, from - 1);
+                rt.State.Day++;
+                rt.Midnight();
+                var charged = 1_000_000 - inventory.PlayerMoney;
+                var told = KioskMenu.TakeMessage();
+                Line($"pay: lowered {id} from level {from} with {days} day(s) of history: now {c.Level}; quoted ${quoted:N0}, charged ${charged:N0} " +
+                     $"(expected ${expected:N0}); owed ${rt.State.Owed:N0}; the kiosk tells '{told}'");
+                if (c.Level != from - 1 || Math.Abs(charged - expected) > 0.5 || Math.Abs(quoted - expected) > 0.5 || rt.State.Owed > 0.5)
+                    Problem("pay: lowering did not cost the quoted penalty at midnight");
+                if (told == null || !told.Contains($"{id} L{from}>{from - 1}"))
+                    Problem("pay: the kiosk was not told of the drop");
+            });
+
+            // 3. Three poor days force the contract two levels down, with the penalty.
+            Try("pay: a forced drop", () =>
+            {
+                c.Level = c.Requested = 3;
+                c.History.Clear();
+                c.History.AddRange(new[] { 0.2, 0.3, 0.4 });
+                c.Closed.Clear();
+                foreach (var w in rt.State.Waybills)
+                    w.Opened = null;
+                var expected = ContractTerms.Penalty(3, 1, 3);
+                inventory.SetMoney(1_000_000);
+                KioskMenu.TakeMessage();
+                rt.State.Day++;
+                rt.Midnight();
+                var charged = 1_000_000 - inventory.PlayerMoney;
+                var told = KioskMenu.TakeMessage();
+                Line($"pay: three poor days at level 3: now {c.Level}; charged ${charged:N0} (expected ${expected:N0}); the kiosk tells '{told}'");
+                if (c.Level != 1 || Math.Abs(charged - expected) > 0.5)
+                    Problem("pay: three poor days did not force two levels down with the penalty");
+            });
+
+            // 4. Ending costs the penalty at once; what the wallet can't cover is owed.
+            var owed = 0.0;
+            Try("pay: ending", () =>
+            {
+                var view = KioskMenu.Desk.Mine().First(v => v.Id == id);
+                var (level, days) = (c.Level, c.History.Count);
+                var expected = ContractTerms.Penalty(level, 0, days);
+                var quoted = KioskMenu.Desk.Penalty(view, 0);
+                inventory.SetMoney(1_000);
+                KioskMenu.Desk.End(view);
+                owed = rt.State.Owed;
+                var data = SaveGameManager.MakeEmptySave();
+                rt.State.Write(data);
+                var back = ContractState.Read(data, out _);
+                Line($"pay: ended {id} at level {level} with {days} day(s) of history: quoted ${quoted:N0} (expected ${expected:N0}); " +
+                     $"wallet ${inventory.PlayerMoney:N0}, owed ${owed:N0} (the desk shows ${KioskMenu.Desk.Owed:N0}); the save reads back owed ${back?.Owed ?? -1:N0}");
+                if (rt.State.Contracts.Any(x => x.Id == id) || Math.Abs(quoted - expected) > 0.5 || inventory.PlayerMoney > 0.5
+                    || Math.Abs(owed - (expected - 1_000)) > 0.5 || back == null || Math.Abs(back.Owed - owed) > 0.5)
+                    Problem("pay: ending did not take the wallet and owe the rest of the penalty");
+            });
+            if (owed > 0.5)
+            {
+                inventory.AddMoney(owed + 5_000);
+                yield return new WaitForSeconds(5f);
+                Try("pay: owed taken", () =>
+                {
+                    Line($"pay: after ${owed + 5_000:N0} came in: wallet ${inventory.PlayerMoney:N0}, owed ${rt.State.Owed:N0}");
+                    if (rt.State.Owed > 0.5 || Math.Abs(inventory.PlayerMoney - 5_000) > 0.5)
+                        Problem("pay: what was owed was not taken as cash came in");
+                });
+            }
         }
 
         private IEnumerator Finish()

@@ -10,8 +10,9 @@ namespace Contracts.Mod.Kiosk
     /// with it as rows. An offer can be taken at any level (the value column shows each
     /// level's carloads a day: out, in and waste for an industry), once the player holds the
     /// licenses it needs; until then the info line says which. The player's own can be raised, lowered, kept at its level
-    /// (undoing a change asked for today) or ended. Each action asks first, on the kiosk's
-    /// own confirm screen; level changes and new contracts take effect at midnight.
+    /// (undoing a change asked for today) or ended, and its last row shows the quick-delivery
+    /// bonus. Lowering and ending show their penalty. Each action asks first, on the kiosk's
+    /// own confirm screen; level changes and new contracts take effect at midnight, an ending now.
     /// </summary>
     internal sealed class ContractScreen : ScrollableDisplayScreen
     {
@@ -107,13 +108,17 @@ namespace Contracts.Mod.Kiosk
                     }
                     : new Choice { Label = $"Raise to level {asked + 1}", Value = "locked", Ask = blocker });
             }
+            // Lowering costs the penalty at midnight; a day more of history by then can only make it less.
             if (asked > 1)
+            {
+                var penalty = desk.Penalty(contract, asked - 1);
                 choices.Add(new Choice
                 {
-                    Label = $"Lower to level {asked - 1}", Value = "penalty",
-                    Ask = $"Lower {contract.Short} to level {asked - 1} from midnight? A downgrade penalty applies.",
+                    Label = $"Lower to level {asked - 1}", Value = penalty > 0.0 ? $"-${penalty:N0}" : "",
+                    Ask = $"Lower {contract.Short} to level {asked - 1} from midnight?" + (penalty > 0.0 ? $" Penalty up to ${penalty:N0}." : ""),
                     Do = () => desk.RequestLevel(contract, asked - 1),
                 });
+            }
             if (contract.Level > 0 && asked != contract.Level)
                 choices.Add(new Choice
                 {
@@ -121,11 +126,20 @@ namespace Contracts.Mod.Kiosk
                     Ask = $"Keep {contract.Short} at level {contract.Level}?",
                     Do = () => desk.RequestLevel(contract, contract.Level),
                 });
+            var ending = desk.Penalty(contract, 0);
             choices.Add(new Choice
             {
-                Label = "End contract", Value = contract.Level > 0 ? "penalty" : "",
-                Ask = $"End {contract.Short}?" + (contract.Level > 0 ? " An ending penalty applies." : ""),
+                Label = "End contract", Value = ending > 0.0 ? $"-${ending:N0}" : "",
+                Ask = $"End {contract.Short} now?" + (ending > 0.0 ? $" Penalty ${ending:N0}." : ""),
                 Do = () => desk.End(contract),
+            });
+            // The quick-delivery bonus at its level, for reading (D7).
+            var bonus = Contracts.Core.Industries.ContractTerms.BonusPercent(contract.Level);
+            choices.Add(new Choice
+            {
+                Label = "Quick delivery bonus", Value = bonus > 0.0 ? $"{bonus:0}%" : "from L2",
+                Ask = bonus > 0.0 ? $"{bonus:0}% on day 1, {bonus / 2:0.#}% day 2, {bonus / 4:0.##}% day 3"
+                    : "Level 2 pays 4%, L3 6%, L4 8%, L5 10%",
             });
         }
 

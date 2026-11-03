@@ -13,6 +13,7 @@ namespace Contracts.Mod.Runtime
     /// needs consistent performance (owner, 2026-11-02; Contracts.Core ContractStanding). A
     /// contract can be taken only with the licenses its traffic needs (LicenseRules, D19).
     /// Ending a contract leaves its cars to finish their legs and drain through the interchanges.
+    /// Lowering or ending one costs the penalty (D7, ContractTerms).
     /// </summary>
     internal sealed class RuntimeDesk : IContractDesk
     {
@@ -144,13 +145,26 @@ namespace Contracts.Mod.Runtime
             return held == null ? "Not your contract" : ContractStanding.RaiseBlocker(held.Level, held.History);
         }
 
+        /// <summary>Ending a contract takes effect now, with its ending penalty (none before it starts).</summary>
         public void End(ContractView contract)
         {
-            if (Rt == null)
+            var held = Rt?.State.Contracts.FirstOrDefault(c => c.Id == contract.Id);
+            if (held == null)
                 return;
-            Rt.State.Contracts.RemoveAll(c => c.Id == contract.Id);
+            var penalty = ContractTerms.Penalty(held.Level, 0, held.History.Count);
+            Rt.State.Contracts.Remove(held);
             Main.Log($"contracts: ended {contract.Id}; its cars finish their legs and drain");
+            if (penalty > 0.0)
+                ContractPay.Charge(Rt.State, penalty, $"ending {held.Id} at level {held.Level}");
         }
+
+        public double Penalty(ContractView contract, int target)
+        {
+            var held = Rt?.State.Contracts.FirstOrDefault(c => c.Id == contract.Id);
+            return held == null ? 0.0 : ContractTerms.Penalty(held.Level, target, held.History.Count);
+        }
+
+        public double Owed => Rt?.State.Owed ?? 0.0;
 
         public string Notice
         {

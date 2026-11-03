@@ -35,6 +35,8 @@ namespace Contracts.Mod.Runtime
     ///   move is done (an empty until loaded, a load until unloaded or gone at an interchange).
     ///   Each midnight scores every contract's day from its bills' ages, and a raise needs
     ///   consistent good days (Contracts.Core ContractStanding).
+    /// - **Pay on top** (D7, ContractPay): quick delivery earns a bonus at levels 2–5; lowering
+    ///   or ending a contract, or three poor days, costs a penalty.
     /// - **Saves.** The state goes under its own key on every save.
     /// </summary>
     internal sealed class ContractRuntime : MonoBehaviour
@@ -192,6 +194,7 @@ namespace Contracts.Mod.Runtime
                 State.ServiceDay = day;
                 Service(day);
             }
+            ContractPay.Collect(State);
             passengerTimer -= 2f;
             if (passengerTimer <= 0f)
             {
@@ -202,7 +205,9 @@ namespace Contracts.Mod.Runtime
 
         /// <summary>
         /// The day just ended is scored for each running contract; then asked-for levels take
-        /// effect (a raise only with the standing for it), and contracts taken today start.
+        /// effect (a raise only with the standing for it), and contracts taken today start. Three
+        /// poor days force a contract down two levels; a drop costs the penalty, and a contract
+        /// dropped to nothing ends (D7, ContractTerms).
         /// </summary>
         internal void Midnight()
         {
@@ -221,9 +226,25 @@ namespace Contracts.Mod.Runtime
                 Main.Log($"contracts: {c.Id} scored {score.Value * 100:0}% on day {State.Day - 1} ({open.Count} open, {closed} closed); " +
                          $"{ContractStanding.Average(c.History) * 100:0}% over {c.History.Count} day(s)");
             }
-            foreach (var c in State.Contracts.Where(c => c.Requested != c.Level && c.Requested >= 1))
+            var changes = new List<string>();
+            var charged = 0.0;
+            foreach (var c in State.Contracts.ToList())
             {
-                if (c.Level >= 1 && c.Requested > c.Level)
+                var target = c.Requested >= 1 ? c.Requested : c.Level;
+                // Three poor days take a contract down two levels (D7, Contracts.Core ContractTerms).
+                var reason = "";
+                var forced = ContractTerms.ForcedLevel(c.Level, c.History);
+                if (forced.HasValue && target > forced.Value)
+                {
+                    target = forced.Value;
+                    reason = " (low performance)";
+                }
+                if (target == c.Level)
+                {
+                    c.Requested = c.Level;
+                    continue;
+                }
+                if (c.Level >= 1 && target > c.Level)
                 {
                     var blocker = ContractStanding.RaiseBlocker(c.Level, c.History);
                     if (blocker != null)
@@ -232,13 +253,31 @@ namespace Contracts.Mod.Runtime
                         c.Requested = c.Level;
                         continue;
                     }
-                    c.Requested = c.Level + 1;
+                    target = c.Level + 1;
                 }
-                Main.Log($"contracts: {c.Id} from level {c.Level} to {c.Requested} at midnight");
-                c.Level = c.Requested;
+                var penalty = ContractTerms.Penalty(c.Level, target, c.History.Count);
+                if (penalty > 0.0)
+                {
+                    ContractPay.Charge(State, penalty, $"{c.Id} from level {c.Level} to {target}{reason}");
+                    charged += penalty;
+                }
+                if (target < 1)
+                {
+                    State.Contracts.Remove(c);
+                    Main.Log($"contracts: {c.Id} ended at midnight{reason}; its cars finish their legs and drain");
+                    changes.Add($"{c.Id} ended");
+                    continue;
+                }
+                Main.Log($"contracts: {c.Id} from level {c.Level} to {target} at midnight{reason}");
+                if (target < c.Level)
+                    changes.Add($"{c.Id} L{c.Level}>{target}");
+                c.Level = c.Requested = target;
                 c.History.Clear();
                 c.Closed.Clear();
             }
+            // The kiosk says what dropped, the next time its Contracts list opens.
+            if (changes.Count > 0)
+                Kiosk.KioskMenu.Tell(charged > 0.0 ? $"{string.Join(", ", changes)}: -${charged:N0}" : string.Join(", ", changes));
         }
 
         /// <summary>Whether a car's bill counts for a contract: the one it is billed to, or the industry it goes to.</summary>
@@ -758,7 +797,7 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>A job's cars, as the jobs manager lists them, else from its tasks.</summary>
-        private static IEnumerable<Car> JobCars(Job job)
+        internal static IEnumerable<Car> JobCars(Job job)
         {
             var jobs = SingletonBehaviour<JobsManager>.Instance;
             var map = jobs == null || job == null ? null : Traverse.Create(jobs).Field("jobToJobCars").GetValue() as System.Collections.IDictionary;
