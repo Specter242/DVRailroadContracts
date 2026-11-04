@@ -344,6 +344,32 @@ namespace Contracts.Core.Industries
             return plan;
         }
 
+        /// <summary>
+        /// Where an empty freed at an unloader goes, at once, rather than at the next service
+        /// (design.md, "Industry work"; owner, 2026-11-04: "add it to the outbound as soon as it's
+        /// ready"): to a contracted industry that loads its car type with cargo the railroad may
+        /// carry, the one that freed it first, then one at the same station, then any; with none,
+        /// back to a random interchange. It is sent with no load planned: it waits at the shipper
+        /// for the next service, which loads the shipper's own empties first.
+        /// </summary>
+        public static Assignment RouteFreedEmpty(IndustryData data, IReadOnlyDictionary<string, int> levels, string guid, string carType,
+            string at, SplitMix64 rng, Func<string, bool> carries = null)
+        {
+            if (data == null) throw new ArgumentNullException(nameof(data));
+            if (rng == null) throw new ArgumentNullException(nameof(rng));
+            levels = levels ?? new Dictionary<string, int>();
+            bool Active(Industry i) => levels.TryGetValue(i.Id, out var l) && l >= 1;
+            bool Loads(Industry i) => i.Lines.Any(line => line.Ships && line.Cargo.Any(c => (carries == null || carries(c)) && data.CarTypes(c).Contains(carType)));
+            var shippers = data.Industries.Where(i => Active(i) && Loads(i)).ToList();
+            var station = data.Industries.FirstOrDefault(i => i.Id == at)?.Station;
+            var shipper = shippers.FirstOrDefault(i => i.Id == at)
+                          ?? shippers.Where(i => station != null && i.Station == station).OrderBy(i => i.Id, StringComparer.Ordinal).FirstOrDefault()
+                          ?? (shippers.Count > 0 ? shippers.OrderBy(i => i.Id, StringComparer.Ordinal).ToList()[rng.Next(shippers.Count)] : null);
+            return shipper != null
+                ? new Assignment { Guid = guid, Kind = AssignmentKind.EmptyToShipper, Destination = shipper.Id, Shipper = shipper.Id }
+                : new Assignment { Guid = guid, Kind = AssignmentKind.ReturnEmpty, Destination = PickInterchange(data, rng) };
+        }
+
         private static string PickInterchange(IndustryData data, SplitMix64 rng) => rng.Pick(data.Interchanges).Id;
     }
 }

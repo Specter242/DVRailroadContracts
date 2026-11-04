@@ -124,6 +124,8 @@ namespace Contracts.Mod.Spike
 
         public double Owed => 0.0;
 
+        public (int Count, string Text) Jobless() => (0, null);
+
         public string Notice
         {
             get

@@ -36,16 +36,21 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("opened")] public double Opened;
     }
 
-    /// <summary>Where a contract car is in its work: what its current job leads to.</summary>
+    /// <summary>
+    /// Where a contract car is in its work: what its current job leads to. A save holds the
+    /// number, so new stages go last.
+    /// </summary>
     internal enum Stage
     {
         Idle,          // no work: the next service plans it
-        ToShipper,     // an empty on its way to a shipper to load
-        Loading,       // spotted for loading at the shipper
+        ToShipper,     // an empty on its way to a shipper: to load, or with no load planned (freed at an unloader) to wait there
+        Loading,       // at the shipper's station: being spotted on its loading track, or waiting for room there
         ToReceiver,    // a load on its way to a receiver's station
-        Unloading,     // spotted for unloading at the receiver
+        Unloading,     // at the receiver's station: being spotted on its unloading track, or waiting for room there
         ToInterchange, // leaving the map: on its way to an interchange track
         OffMap,        // on an interchange track, waiting for the service to take it away
+        BeingLoaded,   // spotted: the shipper loads it, then it goes out at once (IndustryWork)
+        BeingUnloaded, // spotted: the receiver unloads it, then it goes out empty at once
     }
 
     /// <summary>
@@ -62,6 +67,8 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("stage")] public Stage Stage;
         [JsonProperty("at")] public string At;              // the last station or interchange it was known at
         [JsonProperty("opened")] public double? Opened;     // when its open bill was written (ContractRuntime.Clock); null with none open
+        [JsonProperty("spotted")] public double? Spotted;   // when it was spotted at its industry (BeingLoaded, BeingUnloaded)
+        [JsonProperty("ready")] public double? Ready;       // when its industry is done with it, once its work has begun
     }
 
     /// <summary>The runtime's saved state, under its own save key (design, "Saves").</summary>

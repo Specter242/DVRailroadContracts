@@ -51,5 +51,7 @@ namespace Contracts.Mod.Kiosk
         double Owed { get; }
         /// <summary>A line for the Contracts menu, such as the day-duration notice; null for none.</summary>
         string Notice { get; }
+        /// <summary>The contract cars without a job now: how many, and the kiosk's paragraph on them (null for none).</summary>
+        (int Count, string Text) Jobless();
     }
 }

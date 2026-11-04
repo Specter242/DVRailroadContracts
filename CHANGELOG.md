@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.4 (2026-11-04)
+
+- Works with Career Manager API: Contracts is on its kiosk menu, last, after Stats.
+- A car set out for pickup and then moved off the interchange is billed again at the next 06:00 service, instead of waiting there for good.
+- The kiosk's Contracts list has a "Cars without jobs" row that says which contract cars have no job and why.
+- The 06:00 service places its cars over a few frames instead of all at once, so the game hitches much less when it runs.
+- Industries work their own cars. A car that reaches its industry gets a short job to spot it on the industry's track; the industry then loads or unloads it over time, faster at higher contract levels. A finished car goes out at once, joining the outbound job for the same place if it hasn't been taken yet. The kiosk's "Cars without jobs" says when each car will be ready.
+- The mines' scrap gets loaded: before, its empties waited at the mine for good.
+
 ## 0.1.3 (2026-11-03)
 
 - Buying a vehicle shows the whole result on the kiosk. One you can't afford is refused at once, with its price, your cash and how much you're short.

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Diagnostics;
 using Contracts.Core.Industries;
 using Contracts.Core.Sim;
 using DV;
@@ -25,14 +26,20 @@ namespace Contracts.Mod.Runtime
     ///   contract cars whose job ended without finishing (abandoned or expired) go back to
     ///   idle. The core's planner plans the day for the contracts held (Industries/IndustryPlanner):
     ///   bills for idle contract cars, and orders of cars placed now on free interchange tracks,
-    ///   empty or loaded.
+    ///   empty or loaded. The placement and the jobs go a step a frame (BeginService); a save
+    ///   finishes them first.
     /// - **Work is stock jobs** (design, "Waybills and work"), built with Persistent Jobs'
-    ///   generators for the cars' next leg: an empty haul to a shipper, a shunting load there, a
-    ///   transport to the receiver's station or to an interchange track, a shunting unload. When a
-    ///   chain of contract cars completes, the mod writes the next leg at once and takes the cars
-    ///   out of the finished chain, so neither the game nor Persistent Jobs sees them jobless.
+    ///   generators for the cars' next leg: an empty haul to a shipper, a transport to the
+    ///   receiver's station or to an interchange track. When a chain of contract cars completes,
+    ///   the mod writes the next leg at once and takes the cars out of the finished chain, so
+    ///   neither the game nor Persistent Jobs sees them jobless.
+    /// - **Industry work** (design, "Industry work"): at its industry's station a car gets a short
+    ///   job to spot it on the industry's track (StationMoves); the industry then loads or unloads
+    ///   it over time, a car at a time per line at its contract's rate (Contracts.Core
+    ///   IndustryWork), and it goes out at once, joining an outbound job not yet taken.
     /// - **Standing.** A contract car's bill is open from when it is billed for a move until the
-    ///   move is done (an empty until loaded, a load until unloaded or gone at an interchange).
+    ///   move is done (an empty until spotted at its shipper, a load until spotted at its receiver
+    ///   or gone at an interchange); the time an industry works a car counts for no bill.
     ///   Each midnight scores every contract's day from its bills' ages, and a raise needs
     ///   consistent good days (Contracts.Core ContractStanding).
     /// - **Pay on top** (D7, ContractPay): quick delivery earns a bonus at levels 2–5; lowering
@@ -49,8 +56,10 @@ namespace Contracts.Mod.Runtime
         public int LastServiceDay = -1;
 
         private bool newCareer, setUp;
-        private float timer, passengerTimer;
+        private float timer, passengerTimer, spotTimer;
         private readonly HashSet<string> removing = new HashSet<string>(StringComparer.Ordinal);
+        // Cars waiting for room on their industry track, said once in the log.
+        private readonly HashSet<string> waitingSaid = new HashSet<string>(StringComparer.Ordinal);
 
         public static bool Active => Instance != null && Instance.setUp;
 
@@ -136,6 +145,8 @@ namespace Contracts.Mod.Runtime
 
         private void Update()
         {
+            if (service != null)
+                StepService();
             timer -= Time.unscaledDeltaTime;
             if (timer > 0f)
                 return;
@@ -177,7 +188,11 @@ namespace Contracts.Mod.Runtime
                 setUp = true;
                 foreach (var n in Notes)
                     Main.Log("contracts: " + n);
+                LogJobless("after load");
             }
+            // The day moves on once the service under way is done (a second or so).
+            if (service != null)
+                return;
             var now = Now;
             if (now == null)
                 return;
@@ -192,9 +207,16 @@ namespace Contracts.Mod.Runtime
             if (now.Value.Hour >= 6 && State.ServiceDay < day)
             {
                 State.ServiceDay = day;
-                Service(day);
+                BeginService(day);
             }
             ContractPay.Collect(State);
+            WorkIndustries(Clock ?? 0.0);
+            spotTimer -= 2f;
+            if (spotTimer <= 0f)
+            {
+                spotTimer = 15f;
+                SpotWaiting();
+            }
             passengerTimer -= 2f;
             if (passengerTimer <= 0f)
             {
@@ -310,9 +332,81 @@ namespace Contracts.Mod.Runtime
 
         // ------------------------------------------------------------ service
 
-        /// <summary>Runs the interchange service now (also for tests); returns a summary.</summary>
+        /// <summary>A cut of cars, or cars already on the map, that share the next leg's job.</summary>
+        internal sealed class Chunk
+        {
+            public List<TrainCar> Cars;
+            public List<Waybill> Bills;
+            public Track Track;
+        }
+
+        /// <summary>One interchange's new cars (one entry per car, with its order) and how far they are placed.</summary>
+        internal sealed class Fill
+        {
+            public string Interchange;
+            public List<(int Order, TrainCarLivery Livery, CargoType Cargo)> Wanted;
+            public TrackFill<Track> Cuts;
+        }
+
+        /// <summary>A service under way: its steps, what it has placed, and its counts.</summary>
+        internal sealed class ServiceRun
+        {
+            public int Day, Contracts, Taken, Gone, Idled, Recalled, Withdrawn, Bills, SetOut, Placed, Made;
+            public double? Opened;
+            public readonly StagedWork Work = new StagedWork();
+            public double WorkMs, LongestStepMs;
+            public string Summary;
+            /// <summary>The cuts placed, in order ("track: from+count"), and each step's time with what it did.</summary>
+            public readonly List<string> Cuts = new List<string>();
+            public readonly List<(string What, double Ms)> Steps = new List<(string, double)>();
+            internal string Doing;
+            internal List<Chunk> OnTheMap;
+            internal List<(Order Order, List<TrainCar> Cars)> Orders;
+            internal readonly List<Fill> Fills = new List<Fill>();
+            internal int Filling;
+        }
+
+        private ServiceRun service;
+
+        /// <summary>A service is under way.</summary>
+        public bool Servicing => service != null;
+
+        /// <summary>The last service done, with its work's time (for the probe).</summary>
+        public ServiceRun LastService { get; private set; }
+
+        /// <summary>Runs the interchange service now, to the end (tests, the probe); returns a summary.</summary>
         public string Service(int day)
         {
+            if (!BeginService(day))
+                return "no economy";
+            FinishService();
+            return LastService?.Summary;
+        }
+
+        /// <summary>
+        /// Starts the interchange service. Placing a day's cars at once held up the game (146
+        /// cars: 178 ms, then a 262 ms frame), so it goes a step a frame (owner, 2026-11-03,
+        /// "spread the 06:00 service's car placement over several frames"):
+        ///
+        /// 1. Now: the passenger timetable, the sweep of the contract cars, the day's plan, and the
+        ///    bills for cars already on the map.
+        /// 2. A cut of new cars on an interchange track a step, each car billed as it appears (so it
+        ///    is a contract car at once), cuts as the service has always made them (TrackFill).
+        ///    After each cut, a frame of nothing: the game sets up new cars in the frame after
+        ///    they spawn, and that frame then holds no other cut (82 ms frames before it).
+        /// 3. Then a job a step: those of the cars on the map first, then the new cuts', grouped as
+        ///    before, after every new car is in place (a job onto an interchange track takes a track
+        ///    the new cars left free).
+        /// 4. The summary.
+        ///
+        /// The day's cars, tracks and jobs are those of the service at once, unless something else
+        /// takes an interchange track in the second or so it lasts. A save first does what is left
+        /// (<see cref="Saving"/>): the cars and jobs it saves are the whole service's. The day waits
+        /// for it (Tick). Returns false if there is no economy to plan.
+        /// </summary>
+        public bool BeginService(int day)
+        {
+            FinishService();
             var passengers = PassengerRuns.Service(State, day);
             if (passengers != null)
                 Main.Log("contracts: " + passengers);
@@ -320,20 +414,20 @@ namespace Contracts.Mod.Runtime
             {
                 Economy = Economy.Build(Notes);
                 if (Economy?.Data == null)
-                    return "no economy";
+                    return false;
             }
+            var watch = Stopwatch.StartNew();
             var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
             var jobs = SingletonBehaviour<JobsManager>.Instance;
             var carrying = LicenseRules.Carrying();
-            var withdrawn = WithdrawUncarried(carrying);
-            int gone = 0, idled = 0, taken = 0;
+            var run = new ServiceRun { Day = day, Opened = Clock, Withdrawn = WithdrawUncarried(carrying) };
             foreach (var w in State.Waybills.ToList())
             {
                 var car = registry?.GetTrainCarByCarGuid(w.Guid);
                 if (car == null)
                 {
                     State.Remove(w.Guid);
-                    gone++;
+                    run.Gone++;
                     continue;
                 }
                 var track = car.logicCar.FrontBogieTrack;
@@ -344,15 +438,31 @@ namespace Contracts.Mod.Runtime
                         removing.Add(w.Guid);
                         SingletonBehaviour<CarSpawner>.Instance.DeleteCar(car);
                         State.Remove(w.Guid);
-                        taken++;
+                        run.Taken++;
                         continue;
                     }
                 }
-                if (w.Stage != Stage.Idle && w.Stage != Stage.OffMap && jobs?.GetJobOfCar(car.logicCar) == null)
+                // Set out for pickup, then moved off the interchange (the player took it): nothing
+                // collects it there, so it goes back to idle and the planner bills it again (owner,
+                // 2026-11-03: "fix it"). Before, it waited off the map's edge for good.
+                if (w.Stage == Stage.OffMap && jobs?.GetJobOfCar(car.logicCar) == null)
                 {
+                    Main.Log($"contracts: {car.ID} was set out for pickup but stands on {track?.ID?.FullDisplayID ?? "no track"}: back to idle");
                     w.Stage = Stage.Idle;
                     w.At = PlaceOf(car, w);
-                    idled++;
+                    run.Recalled++;
+                }
+                // At an industry: worked on its track, or waiting for room there. Moved off before it
+                // was done, the industry can't work it: back to idle, and the planner bills it again.
+                if (Worked(w) && !OnIndustryTrack(car, w))
+                    Main.Log($"contracts: {car.ID} was moved off its industry track at {w.Next} before it was done: back to idle");
+                var waits = Worked(w) ? OnIndustryTrack(car, w) : WaitsToSpot(car, w);
+                if (w.Stage != Stage.Idle && w.Stage != Stage.OffMap && jobs?.GetJobOfCar(car.logicCar) == null && !waits)
+                {
+                    w.Stage = Stage.Idle;
+                    w.Spotted = w.Ready = null;
+                    w.At = PlaceOf(car, w);
+                    run.Idled++;
                 }
                 if (w.Stage == Stage.Idle)
                 {
@@ -363,6 +473,7 @@ namespace Contracts.Mod.Runtime
 
             var levels = State.Contracts.Where(c => c.Level >= 1 && (Economy.Industries.ContainsKey(c.Id) || Economy.IsBridge(c.Id)))
                 .ToDictionary(c => c.Id, c => c.Level);
+            run.Contracts = levels.Count;
             var fleet = State.Waybills.Select(w => new FleetCar
             {
                 Guid = w.Guid,
@@ -372,9 +483,10 @@ namespace Contracts.Mod.Runtime
                 Busy = w.Stage != Stage.Idle,
             }).Where(f => f.CarType != null).ToList();
             var plan = IndustryPlanner.PlanDay(Economy.Data, levels, fleet, new SplitMix64(State.Seed + (ulong)day), carrying);
+            run.Bills = plan.Assignments.Count;
 
-            // Bills for cars already on the map.
-            var dispatch = new List<(TrainCar Car, Waybill W)>();
+            // Bills for cars already on the map; their jobs come after the new cars are placed.
+            var onTheMap = new List<(TrainCar Car, Waybill W)>();
             foreach (var a in plan.Assignments)
             {
                 var w = State.Of(a.Guid);
@@ -393,42 +505,268 @@ namespace Contracts.Mod.Runtime
                     case AssignmentKind.ExportLoad:
                         if (InterchangeYards.IsInterchangeTrack(car.logicCar.FrontBogieTrack))
                         {
+                            // Already on an interchange track: set out for the next service's pickup, no job.
                             Close(w);
                             w.Stage = Stage.OffMap;
+                            run.SetOut++;
                             continue;
                         }
                         w.Stage = Stage.ToInterchange; w.Next = a.Destination; w.Then = null;
                         break;
                 }
                 Open(w);
-                dispatch.Add((car, w));
+                onTheMap.Add((car, w));
+            }
+            run.OnTheMap = Chunks(onTheMap);
+
+            // The orders, each interchange's cars in order, to fill its empty tracks one after another.
+            run.Orders = plan.Orders.Select(o => (Order: o, Cars: new List<TrainCar>())).ToList();
+            foreach (var at in run.Orders.GroupBy(r => r.Order.Interchange))
+            {
+                var wanted = new List<(int Order, TrainCarLivery Livery, CargoType Cargo)>();
+                foreach (var r in at)
+                {
+                    var o = r.Order;
+                    if (!Globals.G.Types.TryGetCarType(o.CarType, out var type) || type.liveries == null || type.liveries.Count == 0)
+                    {
+                        Main.Warn($"contracts: no car type {o.CarType} for an order of {o.Count}");
+                        continue;
+                    }
+                    var cargo = CargoType.None;
+                    if (o.Loaded && (o.Cargo == null || !Enum.TryParse(o.Cargo, out cargo)))
+                        continue;
+                    for (var i = 0; i < o.Count; i++)
+                        wanted.Add((run.Orders.FindIndex(x => ReferenceEquals(x.Order, o)), type.liveries[0], cargo));
+                }
+                run.Fills.Add(new Fill { Interchange = at.Key, Wanted = wanted, Cuts = new TrackFill<Track>(wanted.Count, InterchangeYards.Tracks(at.Key)) });
+            }
+            service = run;
+            run.Work.Then(PlaceNext);
+            run.WorkMs += watch.Elapsed.TotalMilliseconds;
+            run.LongestStepMs = run.WorkMs;
+            return true;
+        }
+
+        /// <summary>The service's next step, this frame (Update; the probe).</summary>
+        internal void StepService()
+        {
+            var run = service;
+            if (run == null)
+                return;
+            var watch = Stopwatch.StartNew();
+            run.Doing = null;
+            run.Work.Step(StepFailed);
+            var ms = watch.Elapsed.TotalMilliseconds;
+            run.WorkMs += ms;
+            run.LongestStepMs = Math.Max(run.LongestStepMs, ms);
+            run.Steps.Add((run.Doing, ms));
+            if (!run.Work.Pending && service == run)
+                service = null;
+        }
+
+        /// <summary>Does what is left of the service under way at once: before a save, or a service run to the end.</summary>
+        public void FinishService()
+        {
+            var run = service;
+            if (run == null)
+                return;
+            var watch = Stopwatch.StartNew();
+            var steps = run.Work.Finish(StepFailed);
+            var ms = watch.Elapsed.TotalMilliseconds;
+            run.WorkMs += ms;
+            run.LongestStepMs = Math.Max(run.LongestStepMs, ms);
+            if (service == run)
+                service = null;
+            if (steps > 1)
+                Main.Log($"contracts: the service's last {steps} step(s) done at once ({ms:F0} ms)");
+        }
+
+        private static void StepFailed(Exception e) => Main.Error($"contracts: a service step failed; the service goes on: {e}");
+
+        /// <summary>
+        /// A step: the next cut of new cars on its interchange track, then this step again; or,
+        /// every cut placed, the jobs a step each and the summary.
+        /// </summary>
+        private void PlaceNext()
+        {
+            var run = service;
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            while (run.Filling < run.Fills.Count)
+            {
+                var fill = run.Fills[run.Filling];
+                var cut = fill.Cuts.Next(FreeForCut, t => t.length, (from, count) => CutLength(spawner, fill, from, count));
+                if (cut == null)
+                {
+                    if (fill.Cuts.Unplaced > 0)
+                        Main.Warn($"contracts: interchange {fill.Interchange} had no room for {fill.Cuts.Unplaced} of {fill.Cuts.Cars} car(s)");
+                    run.Filling++;
+                    continue;
+                }
+                // A cut placed: a frame for the game to set its cars up, with no other cut in it.
+                if (Spawn(run, fill, cut, spawner))
+                    run.Work.Then(() => run.Doing = "a frame for the cut's cars to settle");
+                run.Work.Then(PlaceNext);
+                return;
             }
 
-            // Orders placed at the interchanges now: each interchange's cars arrive as cuts filling its empty tracks.
-            int placed = 0, short_ = 0;
-            foreach (var (order, cars) in PlaceAll(plan.Orders))
-            {
-                placed += cars.Count;
-                short_ += order.Count - cars.Count;
-                foreach (var car in cars)
+            // Every cut placed: the new cars' bills in the orders' order, as the service has always
+            // listed them, then the jobs, a step each.
+            var fresh = run.Orders.SelectMany(r => r.Cars).Where(c => c != null).Select(c => State.Of(c.logicCar.carGuid)).Where(w => w != null).ToList();
+            var set = new HashSet<Waybill>(fresh);
+            State.Waybills.RemoveAll(set.Contains);
+            foreach (var w in fresh)
+                State.Add(w);
+            var placed = run.Orders.SelectMany(r => r.Cars).Where(c => c != null && State.Of(c.logicCar.carGuid) != null)
+                .Select(c => (Car: c, W: State.Of(c.logicCar.carGuid))).ToList();
+            foreach (var chunk in run.OnTheMap.Concat(Chunks(placed)))
+                run.Work.Then(() =>
                 {
-                    var w = new Waybill
-                    {
-                        Guid = car.logicCar.carGuid, Contract = order.Contract, Cargo = order.Cargo,
-                        Next = order.BilledTo, Then = order.Then, At = order.Interchange, Opened = Clock,
-                        Stage = order.Loaded ? (Economy.IsInterchange(order.BilledTo) ? Stage.ToInterchange : Stage.ToReceiver) : Stage.ToShipper,
-                    };
-                    State.Add(w);
-                    dispatch.Add((car, w));
+                    run.Doing = $"a job for {chunk.Cars.Count} car(s)";
+                    if (Write(chunk))
+                        run.Made++;
+                });
+            run.Work.Then(EndService);
+            run.Doing = "the bills reordered, the jobs grouped";
+        }
+
+        /// <summary>An interchange track a cut can go on: no car on it, even in part.</summary>
+        private static bool FreeForCut(Track t) =>
+            t.GetCarsFullyOnTrack().Count == 0 && t.GetCarsPartiallyOnTrack().Count == 0 && RailTrackRegistry.LogicToRailTrack.ContainsKey(t);
+
+        private static double CutLength(CarSpawner spawner, Fill fill, int from, int count) =>
+            spawner.GetTotalCarLiveriesLength(fill.Wanted.Skip(from).Take(count).Select(w => w.Livery).ToList(), true);
+
+#if DEVTOOLS
+        /// <summary>
+        /// The cuts the service just begun would make placing them all now, as it did before it
+        /// went a step a frame (the probe checks the steps make the same).
+        /// </summary>
+        internal List<string> CutsAtOnce()
+        {
+            var run = service;
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var cuts = new List<string>();
+            if (run == null || run.Cuts.Count > 0)
+                return null;
+            foreach (var fill in run.Fills)
+            {
+                var dry = new TrackFill<Track>(fill.Wanted.Count, InterchangeYards.Tracks(fill.Interchange));
+                while (dry.Next(FreeForCut, t => t.length, (from, count) => CutLength(spawner, fill, from, count)) is TrackCut<Track> cut)
+                {
+                    dry.Spawned(cut);
+                    cuts.Add($"{cut.Track.ID.FullDisplayID}: {cut.From}+{cut.Count}");
                 }
             }
-            var made = Dispatch(dispatch);
-            var summary = $"service day {day}: {levels.Count} contract(s) at work; {taken} car(s) taken off the map, {gone} gone, {idled} back to idle, {withdrawn} withdrawn; " +
-                          $"{plan.Assignments.Count} bill(s), {placed} car(s) placed ({short_} short), {made} job(s)";
-            Main.Log("contracts: " + summary);
-            Notes.Add(summary);
-            LastServiceDay = day;
-            return summary;
+            return cuts;
+        }
+#endif
+
+        /// <summary>Spawns a cut, loaded if its orders say so, and bills its cars at once; false if it failed (its cars go to the next track).</summary>
+        private bool Spawn(ServiceRun run, Fill fill, TrackCut<Track> cut, CarSpawner spawner)
+        {
+            var wanted = fill.Wanted.Skip(cut.From).Take(cut.Count).ToList();
+            var cars = spawner.SpawnCarTypesOnTrack(wanted.Select(w => w.Livery).ToList(), null, RailTrackRegistry.LogicToRailTrack[cut.Track],
+                preventAutoCoupleOnLastCars: true, applyHandbrakeOnLastCars: true);
+            if (cars == null || cars.Count != wanted.Count)
+            {
+                Main.Warn($"contracts: spawning {wanted.Count} car(s) on {cut.Track.ID.FullDisplayID} failed");
+                return false;
+            }
+            fill.Cuts.Spawned(cut);
+            run.Cuts.Add($"{cut.Track.ID.FullDisplayID}: {cut.From}+{cut.Count}");
+            run.Doing = $"a cut of {cars.Count} car(s) on {cut.Track.ID.FullDisplayID}";
+            for (var i = 0; i < cars.Count; i++)
+            {
+                if (wanted[i].Cargo != CargoType.None)
+                    cars[i].logicCar.LoadCargo(cars[i].logicCar.capacity, wanted[i].Cargo);
+                var (order, list) = run.Orders[wanted[i].Order];
+                list.Add(cars[i]);
+                State.Add(new Waybill
+                {
+                    Guid = cars[i].logicCar.carGuid, Contract = order.Contract, Cargo = order.Cargo,
+                    Next = order.BilledTo, Then = order.Then, At = order.Interchange, Opened = run.Opened,
+                    Stage = order.Loaded ? (Economy.IsInterchange(order.BilledTo) ? Stage.ToInterchange : Stage.ToReceiver) : Stage.ToShipper,
+                });
+            }
+            run.Placed += cars.Count;
+            return true;
+        }
+
+        /// <summary>The last step: the service's summary.</summary>
+        private void EndService()
+        {
+            var run = service;
+            var short_ = run.Orders.Sum(r => r.Order.Count - r.Cars.Count);
+            run.Summary = $"service day {run.Day}: {run.Contracts} contract(s) at work; {run.Taken} car(s) taken off the map, {run.Gone} gone, {run.Idled} back to idle, " +
+                          (run.Recalled > 0 ? $"{run.Recalled} moved off an interchange back to idle, " : "") + $"{run.Withdrawn} withdrawn; " +
+                          $"{run.Bills} bill(s) ({run.SetOut} set out for pickup), {run.Placed} car(s) placed ({short_} short), {run.Made} job(s)";
+            Main.Log($"contracts: {run.Summary} (in {run.Work.Run} steps after the plan, {run.WorkMs:F0} ms of work so far, the longest step {run.LongestStepMs:F0} ms)");
+            run.Doing = "the summary";
+            Notes.Add(run.Summary);
+            LastServiceDay = run.Day;
+            LastService = run;
+            LogJobless("after the service");
+        }
+
+        /// <summary>
+        /// The contract cars without a job now, and why (Core JoblessReport): set out on an
+        /// interchange track for the pickup, moved off one after, at an industry being loaded or
+        /// unloaded (with when it will be done), waiting for room on an industry track, idle, or
+        /// their job ended unfinished. For the kiosk's "Cars without jobs" and the log.
+        /// </summary>
+        internal List<JoblessCar> Jobless()
+        {
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var result = new List<JoblessCar>();
+            if (registry == null || jobs == null)
+                return result;
+            foreach (var w in State.Waybills)
+            {
+                var car = registry.GetTrainCarByCarGuid(w.Guid);
+                if (car == null || car.logicCar == null || jobs.GetJobOfCar(car.logicCar) != null)
+                    continue;
+                var track = car.logicCar.FrontBogieTrack;
+                var interchange = InterchangeYards.InterchangeOf(track);
+                // A car with no track (derailed, or its bogies not yet on one) says so, not "?".
+                var place = interchange != null ? InterchangeYards.CodeOf(interchange) : track == null ? "no track" : track.ID?.yardId;
+                var reason = w.Stage == Stage.OffMap ? (interchange != null ? JoblessReason.WaitingForPickup : JoblessReason.MovedOffInterchange)
+                    : w.Stage == Stage.Idle ? JoblessReason.Idle
+                    : w.Stage == Stage.BeingLoaded ? JoblessReason.BeingLoaded
+                    : w.Stage == Stage.BeingUnloaded ? JoblessReason.BeingUnloaded
+                    : WaitsToSpot(car, w) ? JoblessReason.WaitingToSpot : JoblessReason.JobEnded;
+                // At an industry: when it will be done (once its work has begun).
+                var note = Worked(w) && w.Ready is double ready && Clock is double now ? IndustryWork.When(ready, now) : null;
+                result.Add(new JoblessCar(car.ID, reason, place, note));
+            }
+            return result;
+        }
+
+        private void LogJobless(string when)
+        {
+            var line = JoblessReport.LogLine(Jobless());
+            Main.Log($"contracts: {when}, " + (line ?? "every contract car has a job"));
+        }
+
+        /// <summary>
+        /// A save gathers the cars and jobs before the mod's own data (SaveGameManager calls
+        /// OnInternalDataUpdate last): the service under way is finished first, so the save holds
+        /// all of it.
+        /// </summary>
+        [HarmonyPatch(typeof(SaveGameManager), "UpdateInternalData")]
+        private static class Saving
+        {
+            private static void Prefix()
+            {
+                try
+                {
+                    Instance?.FinishService();
+                }
+                catch (Exception e)
+                {
+                    Main.Error($"contracts: finishing the service before a save failed: {e}");
+                }
+            }
         }
 
         /// <summary>
@@ -450,7 +788,8 @@ namespace Contracts.Mod.Runtime
             var n = 0;
             foreach (var w in State.Waybills)
             {
-                if (w.Cargo == null || w.Stage == Stage.Idle || w.Stage == Stage.OffMap || carries(w.Cargo))
+                // A car at its industry is the industry's to load or unload; a load is checked when it is ready.
+                if (w.Cargo == null || w.Stage == Stage.Idle || w.Stage == Stage.OffMap || Worked(w) || carries(w.Cargo))
                     continue;
                 var car = registry.GetTrainCarByCarGuid(w.Guid);
                 var job = car == null ? null : jobs.GetJobOfCar(car.logicCar);
@@ -515,69 +854,6 @@ namespace Contracts.Mod.Runtime
             return Economy.Industries.Values.FirstOrDefault(i => i.Station == yard)?.Id ?? w.At;
         }
 
-        /// <summary>
-        /// Spawns the orders' cars at their interchanges, loaded if an order says so: each
-        /// interchange's cars in order, as cuts that fill its empty tracks one after another
-        /// (a track with cars on it is left alone).
-        /// </summary>
-        private List<(Order Order, List<TrainCar> Cars)> PlaceAll(List<Order> orders)
-        {
-            var result = orders.Select(o => (Order: o, Cars: new List<TrainCar>())).ToList();
-            var spawner = SingletonBehaviour<CarSpawner>.Instance;
-            foreach (var at in result.GroupBy(r => r.Order.Interchange))
-            {
-                // The cars wanted here, one entry per car, each with its order.
-                var wanted = new List<(int Order, TrainCarLivery Livery, CargoType Cargo)>();
-                foreach (var r in at)
-                {
-                    var o = r.Order;
-                    if (!Globals.G.Types.TryGetCarType(o.CarType, out var type) || type.liveries == null || type.liveries.Count == 0)
-                    {
-                        Main.Warn($"contracts: no car type {o.CarType} for an order of {o.Count}");
-                        continue;
-                    }
-                    var cargo = CargoType.None;
-                    if (o.Loaded && (o.Cargo == null || !Enum.TryParse(o.Cargo, out cargo)))
-                        continue;
-                    for (var i = 0; i < o.Count; i++)
-                        wanted.Add((result.FindIndex(x => ReferenceEquals(x.Order, o)), type.liveries[0], cargo));
-                }
-                var next = 0;
-                foreach (var track in InterchangeYards.Tracks(at.Key).Where(t => t.GetCarsFullyOnTrack().Count == 0 && t.GetCarsPartiallyOnTrack().Count == 0))
-                {
-                    if (next >= wanted.Count)
-                        break;
-                    var rail = RailTrackRegistry.LogicToRailTrack.TryGetValue(track, out var r) ? r : null;
-                    if (rail == null)
-                        continue;
-                    // As many as fit, with room to spare at the ends.
-                    var take = 0;
-                    while (next + take < wanted.Count &&
-                           spawner.GetTotalCarLiveriesLength(wanted.Skip(next).Take(take + 1).Select(w => w.Livery).ToList(), true) < track.length - 30.0)
-                        take++;
-                    if (take == 0)
-                        continue;
-                    var cut = wanted.Skip(next).Take(take).ToList();
-                    var cars = spawner.SpawnCarTypesOnTrack(cut.Select(w => w.Livery).ToList(), null, rail, preventAutoCoupleOnLastCars: true, applyHandbrakeOnLastCars: true);
-                    if (cars == null || cars.Count != cut.Count)
-                    {
-                        Main.Warn($"contracts: spawning {cut.Count} car(s) on {track.ID.FullDisplayID} failed");
-                        continue;
-                    }
-                    for (var i = 0; i < cars.Count; i++)
-                    {
-                        if (cut[i].Cargo != CargoType.None)
-                            cars[i].logicCar.LoadCargo(cars[i].logicCar.capacity, cut[i].Cargo);
-                        result[cut[i].Order].Cars.Add(cars[i]);
-                    }
-                    next += take;
-                }
-                if (next < wanted.Count)
-                    Main.Warn($"contracts: interchange {at.Key} had no room for {wanted.Count - next} of {wanted.Count} car(s)");
-            }
-            return result;
-        }
-
         private static int MaxCarsPerJob() => Math.Max(3, SingletonBehaviour<LicenseManager>.Instance?.GetMaxNumberOfCarsPerJobWithAcquiredJobLicenses() ?? 5);
 
         // ------------------------------------------------------------ jobs
@@ -590,6 +866,16 @@ namespace Contracts.Mod.Runtime
         private int Dispatch(List<(TrainCar Car, Waybill W)> cars, Track standingOn = null)
         {
             var made = 0;
+            foreach (var chunk in Chunks(cars, standingOn))
+                if (Write(chunk))
+                    made++;
+            return made;
+        }
+
+        /// <summary>Cars grouped for their next leg's jobs, by where they stand and where they go, each group cut to the licences' train length.</summary>
+        private List<Chunk> Chunks(List<(TrainCar Car, Waybill W)> cars, Track standingOn = null)
+        {
+            var chunks = new List<Chunk>();
             var groups = cars.GroupBy(c =>
             {
                 var track = standingOn ?? c.Car.logicCar.FrontBogieTrack;
@@ -601,19 +887,36 @@ namespace Contracts.Mod.Runtime
                 for (var i = 0; i < list.Count; i += MaxCarsPerJob())
                 {
                     var chunk = list.Skip(i).Take(MaxCarsPerJob()).ToList();
-                    var chain = NextLeg(chunk.Select(c => c.Car).ToList(), chunk.Select(c => c.W).ToList(), g.Key.Track);
-                    if (chain == null)
-                    {
-                        foreach (var c in chunk)
-                            if (c.W.Stage != Stage.OffMap)
-                                c.W.Stage = Stage.Idle;
-                        continue;
-                    }
-                    chain.FinalizeSetupAndGenerateFirstJob(false);
-                    made++;
+                    chunks.Add(new Chunk { Cars = chunk.Select(c => c.Car).ToList(), Bills = chunk.Select(c => c.W).ToList(), Track = g.Key.Track });
                 }
             }
-            return made;
+            return chunks;
+        }
+
+        /// <summary>
+        /// A group's job, or null if none could be made (its cars go idle). A car gone since the
+        /// group was made (the service writes its jobs a step a frame) idles the group; the next
+        /// service plans its cars again.
+        /// </summary>
+        private bool Write(Chunk chunk)
+        {
+            var gone = chunk.Cars.Any(c => c == null || State.Of(c.logicCar?.carGuid) == null);
+            if (!gone && SpotLeg(chunk.Bills[0], chunk.Track))
+                return WriteSpot(chunk);
+            var chain = gone ? null : NextLeg(chunk.Cars, chunk.Bills, chunk.Track);
+            if (chain == null)
+            {
+                var first = chunk.Bills[0];
+                Main.Warn($"contracts: no job for {chunk.Cars.Count} car(s) ({string.Join(", ", chunk.Cars.Where(c => c != null).Select(c => c.ID))}) " +
+                          $"on {chunk.Track?.ID?.FullDisplayID ?? "no track"}, {first.Stage} to {first.Next ?? "?"}" +
+                          (gone ? " (a car of theirs is gone)" : "") + "; they go idle until the next service");
+                foreach (var w in chunk.Bills)
+                    if (w.Stage != Stage.OffMap)
+                        w.Stage = Stage.Idle;
+                return false;
+            }
+            chain.FinalizeSetupAndGenerateFirstJob(false);
+            return true;
         }
 
         /// <summary>
@@ -626,18 +929,18 @@ namespace Contracts.Mod.Runtime
         {
             var nextStation = Economy.StationOf(w.Next) ?? w.Next;
             var here = track?.ID == null || track.ID.IsGeneric() ? null : track.ID.yardId;
+            // At its industry's station: spotted next, with the cars for the same industry tracks.
+            if (SpotLeg(w, track))
+            {
+                var cargo = w.Cargo != null && Enum.TryParse(w.Cargo, out CargoType c) ? c : CargoType.None;
+                var tracks = IndustryTracks(Economy.Station(here), cargo).Select(m => m.WarehouseTrack.ID.FullID).Distinct().OrderBy(id => id, StringComparer.Ordinal);
+                return $"spot>{w.Next}>{(Loads(w) ? "load" : "unload")}>{string.Join("+", tracks)}";
+            }
             switch (w.Stage)
             {
-                // Already at the shipper's station: loading next (NextLeg), so grouped as a load.
-                case Stage.ToShipper when nextStation == here:
-                    return $"{Stage.Loading}>{w.Next}>{w.Then}>{w.Cargo}";
                 case Stage.ToShipper:
                 case Stage.ToReceiver:
                     return $"{w.Stage}>{nextStation}";
-                case Stage.Loading:
-                    return $"{w.Stage}>{w.Next}>{w.Then}>{w.Cargo}";
-                case Stage.Unloading:
-                    return $"{w.Stage}";
                 default:
                     return $"{w.Stage}>{w.Next}";
             }
@@ -661,23 +964,14 @@ namespace Contracts.Mod.Runtime
                 case Stage.ToShipper:
                     if (next == null)
                         return null;
+                    // A freed empty for a shipper at the station it was freed at: off the industry track, into storage.
                     if (next == here)
-                        return Load(cars, bills, here, track);
+                        return Pull(cars, here, track);
                     return PersistentJobs.EmptyHaul(here, next, track, cars, random, null);
-                case Stage.Loading:
-                    return Load(cars, bills, here, track);
                 case Stage.ToReceiver:
                     if (next == null)
                         return null;
-                    if (next == here)
-                    {
-                        foreach (var b in bills)
-                            b.Stage = Stage.Unloading;
-                        return PersistentJobs.ShuntingUnload(here, track, cars, random);
-                    }
                     return PersistentJobs.Transport(here, track, next, cars, Cargo(cars), random, false, null);
-                case Stage.Unloading:
-                    return PersistentJobs.ShuntingUnload(here, track, cars, random);
                 case Stage.ToInterchange:
                 {
                     var to = Economy.Station(InterchangeYards.StationOf(w.Next));
@@ -701,31 +995,369 @@ namespace Contracts.Mod.Runtime
 
         private static List<CargoType> Cargo(List<TrainCar> cars) => cars.Select(c => c.logicCar.CurrentCargoTypeInCar).ToList();
 
-        /// <summary>A shunting load at the shipper, for the load's next stop: a receiver's station or an interchange's.</summary>
-        private JobChainController Load(List<TrainCar> cars, List<Waybill> bills, StationController shipper, Track track)
+        // ------------------------------------------------------------ industry work
+
+        /// <summary>Whether a car is at its industry, being loaded or unloaded.</summary>
+        internal static bool Worked(Waybill w) => w.Stage == Stage.BeingLoaded || w.Stage == Stage.BeingUnloaded;
+
+        /// <summary>Whether a car's industry loads it (an empty for its shipper) rather than unloads it.</summary>
+        private static bool Loads(Waybill w) => w.Stage == Stage.ToShipper || w.Stage == Stage.Loading || w.Stage == Stage.BeingLoaded;
+
+        /// <summary>
+        /// Whether a car standing on a track is at its industry's station to be spotted there: an
+        /// empty with a load planned at its shipper, or a load at its receiver.
+        /// </summary>
+        private bool SpotLeg(Waybill w, Track track)
         {
+            var here = track?.ID == null || track.ID.IsGeneric() ? null : track.ID.yardId;
+            if (here == null || Economy.StationOf(w.Next) != here || !Economy.Industries.ContainsKey(w.Next))
+                return false;
+            return w.Stage == Stage.Loading || w.Stage == Stage.Unloading || w.Stage == Stage.ToReceiver
+                   || w.Stage == Stage.ToShipper && w.Cargo != null;
+        }
+
+        /// <summary>The cargo a car's industry track handles: the load to be, or the load it carries.</summary>
+        private static CargoType TrackCargo(TrainCar car, Waybill w)
+        {
+            if (!Loads(w))
+                return car.logicCar.CurrentCargoTypeInCar;
+            return w.Cargo != null && Enum.TryParse(w.Cargo, out CargoType cargo) ? cargo : CargoType.None;
+        }
+
+        /// <summary>
+        /// The warehouse machines (their tracks are the industry's) at a station that handle a
+        /// cargo; for a cargo none handles there (the scrap the mod adds to the mines), all of the
+        /// station's, as the industry loads and unloads its cars itself.
+        /// </summary>
+        private static List<WarehouseMachine> IndustryTracks(StationController station, CargoType cargo)
+        {
+            if (station == null || cargo == CargoType.None)
+                return new List<WarehouseMachine>();
+            var yard = station.logicStation.yard;
+            var handling = yard.GetWarehouseMachinesThatSupportCargoTypes(new List<CargoType> { cargo }) ?? new List<WarehouseMachine>();
+            return handling.Count > 0 ? handling : yard.WarehouseMachines?.Where(m => m?.WarehouseTrack != null).ToList() ?? new List<WarehouseMachine>();
+        }
+
+        private WarehouseMachine MachineUnder(TrainCar car, Waybill w)
+        {
+            var track = car.logicCar.FrontBogieTrack;
+            return track == null ? null : IndustryTracks(Economy.Station(Economy.StationOf(w.Next)), TrackCargo(car, w)).FirstOrDefault(m => m.WarehouseTrack == track);
+        }
+
+        /// <summary>Whether a car stands on a track of its industry that handles its cargo.</summary>
+        internal bool OnIndustryTrack(TrainCar car, Waybill w) => MachineUnder(car, w) != null;
+
+        /// <summary>Whether a car with no job waits at its industry's station for room on the industry's track (SpotWaiting).</summary>
+        internal bool WaitsToSpot(TrainCar car, Waybill w) =>
+            (w.Stage == Stage.Loading || w.Stage == Stage.Unloading) && SpotLeg(w, car.logicCar.FrontBogieTrack);
+
+        /// <summary>
+        /// Spots cars at their industry (design, "Industry work"): a job to move them onto the
+        /// industry's track for their cargo, the one with the most room, taking as many as fit.
+        /// Those that don't fit wait at the station, without a job, until there is room
+        /// (SpotWaiting). Cars already on it are spotted where they stand. A load the player may
+        /// not carry is not loaded (D19): its empty goes idle, and the service plans it again.
+        /// Returns whether a job was made.
+        /// </summary>
+        private bool WriteSpot(Chunk chunk)
+        {
+            var cars = chunk.Cars;
+            var bills = chunk.Bills;
+            var track = chunk.Track;
             var w = bills[0];
-            if (w.Cargo == null || !Enum.TryParse(w.Cargo, out CargoType cargo))
-                return null;
-            // A load the player may not carry is not written (D19); the service re-plans the car.
-            if (!LicenseRules.Carrying()(w.Cargo))
-            {
-                Main.Log($"licenses: {cars.Count} car(s) not loaded with {w.Cargo} at {shipper.stationInfo.YardID}: no license; they go idle");
-                return null;
-            }
-            var machine = shipper.logicStation.yard.GetWarehouseMachinesThatSupportCargoTypes(new List<CargoType> { cargo }).FirstOrDefault();
-            var destination = Economy.Station(Economy.StationOf(w.Then));
-            if (machine == null || destination == null)
-            {
-                Main.Warn($"contracts: {shipper.stationInfo.YardID} can't load {w.Cargo} for {w.Then}");
-                return null;
-            }
+            var loading = Loads(w);
             foreach (var b in bills)
-                b.Stage = Stage.Loading;
-            // Cars standing on the given track (the group's) are listed there, whatever their bogies say.
-            var perTrack = cars.GroupBy(c => c.logicCar.FrontBogieTrack == null || cars.All(x => x.logicCar.FrontBogieTrack != track) ? track : c.logicCar.FrontBogieTrack)
-                .Select(g => new CarsPerTrack(g.Key, g.Select(c => c.logicCar).ToList())).ToList();
-            return PersistentJobs.ShuntingLoad(shipper, perTrack, machine, destination, cars, cars.Select(_ => cargo).ToList(), false);
+                b.Stage = loading ? Stage.Loading : Stage.Unloading;
+            var here = Economy.Station(track.ID.yardId);
+            void GoIdle(string why)
+            {
+                Main.Warn($"contracts: {cars.Count} car(s) ({string.Join(", ", cars.Select(c => c.ID))}) not spotted at {w.Next}: {why}; they go idle until the next service");
+                foreach (var b in bills)
+                    b.Stage = Stage.Idle;
+            }
+            if (loading && !LicenseRules.Carrying()(w.Cargo))
+            {
+                GoIdle($"no license for {w.Cargo}");
+                return false;
+            }
+            var cargo = TrackCargo(cars[0], w);
+            var machines = IndustryTracks(here, cargo);
+            if (machines.Count == 0)
+            {
+                GoIdle($"no track there {(loading ? "loads" : "unloads")} {cargo}");
+                return false;
+            }
+            if (machines.Any(m => m.WarehouseTrack == track))
+            {
+                foreach (var b in bills)
+                    BeginWork(b);
+                Main.Log($"contracts: {cars.Count} car(s) ({string.Join(", ", cars.Select(c => c.ID))}) spotted where they stand, on {track.ID.FullDisplayID}");
+                return false;
+            }
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var best = machines.OrderByDescending(m => Room(m.WarehouseTrack)).First();
+            var room = Room(best.WarehouseTrack);
+            var fit = 0;
+            while (fit < cars.Count && spawner.GetTotalTrainCarsLength(cars.Take(fit + 1).Select(c => c.logicCar).ToList(), true) <= room)
+                fit++;
+            foreach (var c in cars.Skip(fit))
+                if (waitingSaid.Add(c.logicCar.carGuid))
+                    Main.Log($"contracts: {c.ID} waits at {here.stationInfo.YardID} for room on {best.WarehouseTrack.ID.FullDisplayID} ({room:F0} m free)");
+            if (fit == 0)
+                return false;
+            var spotted = cars.Take(fit).ToList();
+            var chain = StationMoves.Move(here, track, best.WarehouseTrack, spotted);
+            if (chain == null)
+            {
+                GoIdle("mixed loaded and empty cars");
+                return false;
+            }
+            foreach (var c in spotted)
+                waitingSaid.Remove(c.logicCar.carGuid);
+            chain.FinalizeSetupAndGenerateFirstJob(false);
+            Main.Log($"contracts: {spotted.Count} car(s) ({string.Join(", ", spotted.Select(c => c.ID))}) to be spotted on {best.WarehouseTrack.ID.FullDisplayID} at {w.Next} " +
+                     $"({spawner.GetTotalTrainCarsLength(spotted.Select(c => c.logicCar).ToList(), true):F0} m of {room:F0} m free)");
+            return true;
+        }
+
+        /// <summary>
+        /// The room left on an industry track: its free length, less the cars of spot jobs not yet
+        /// taken that head for it (Persistent Jobs reserves a job's track only when it is taken).
+        /// </summary>
+        private double Room(Track track)
+        {
+            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var heading = new List<Car>();
+            foreach (var w in State.Waybills.Where(w => w.Stage == Stage.Loading || w.Stage == Stage.Unloading))
+            {
+                var car = registry?.GetTrainCarByCarGuid(w.Guid);
+                var job = car == null ? null : jobs?.GetJobOfCar(car.logicCar);
+                if (job != null && job.State == JobState.Available && car.logicCar.FrontBogieTrack != track && JobDestination(job) == track)
+                    heading.Add(car.logicCar);
+            }
+            var pending = heading.Count == 0 ? 0f : SingletonBehaviour<CarSpawner>.Instance.GetTotalCarsLength(heading, true);
+            return organizer.GetFreeSpaceOnTrack(track) - pending;
+        }
+
+        /// <summary>A freed empty off its industry's track into the station's storage, the track with the most room that holds it; null if none does.</summary>
+        private static JobChainController Pull(List<TrainCar> cars, StationController station, Track track)
+        {
+            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            var length = SingletonBehaviour<CarSpawner>.Instance.GetTotalTrainCarsLength(cars.Select(c => c.logicCar).ToList(), true);
+            var into = station.logicStation.yard.StorageTracks.Where(t => t != track && organizer.GetFreeSpaceOnTrack(t) >= length)
+                .OrderByDescending(t => organizer.GetFreeSpaceOnTrack(t)).FirstOrDefault();
+            if (into == null)
+            {
+                Main.Warn($"contracts: no storage track at {station.stationInfo.YardID} holds {cars.Count} empty car(s) off its industry track");
+                return null;
+            }
+            return StationMoves.Move(station, track, into, cars);
+        }
+
+        /// <summary>
+        /// A car spotted at its industry: the move there is done, so its bill closes (the
+        /// railroad's part; the industry's time counts for no bill), and the industry's work begins.
+        /// </summary>
+        private void BeginWork(Waybill w)
+        {
+            Close(w);
+            w.Stage = Loads(w) ? Stage.BeingLoaded : Stage.BeingUnloaded;
+            w.At = w.Next;
+            w.Spotted = Clock;
+            w.Ready = null;
+        }
+
+        /// <summary>The level a contract works at: its own, or 1 if it is not held or not yet started.</summary>
+        private int LevelOf(string id) => Math.Max(1, State.Contracts.FirstOrDefault(c => c.Id == id)?.Level ?? 1);
+
+        /// <summary>
+        /// The industries' work brought up to <paramref name="now"/> (Tick; the probe, with a
+        /// later clock): each line's queue of spotted cars advances at its contract's rate
+        /// (Contracts.Core IndustryWork), and the cars done go out at once (SendOut). A car done
+        /// but no longer on its industry track waits until it is back on it (the service sends it
+        /// back to idle). Returns the cars that went out.
+        /// </summary>
+        internal int WorkIndustries(double now)
+        {
+            if (Economy?.Data == null || service != null)
+                return 0;
+            var working = State.Waybills.Where(Worked).ToList();
+            if (working.Count == 0)
+                return 0;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var done = new List<(TrainCar Car, Waybill W, double Ready)>();
+            foreach (var line in working.GroupBy(w =>
+                     {
+                         Economy.Industries.TryGetValue(w.Next ?? "", out var industry);
+                         var cargoLine = IndustryWork.LineFor(industry, w.Cargo, w.Stage == Stage.BeingLoaded);
+                         return (w.Next, w.Stage, Line: cargoLine?.ToString() ?? w.Cargo);
+                     }))
+            {
+                var first = line.First();
+                Economy.Industries.TryGetValue(first.Next ?? "", out var industry);
+                var cargoLine = IndustryWork.LineFor(industry, first.Cargo, first.Stage == Stage.BeingLoaded);
+                var daysPerCar = industry == null || cargoLine == null ? 1.0
+                    : IndustryWork.DaysPerCar(IndustryWork.CarsPerDay(industry, cargoLine, LevelOf(industry.Id)));
+                var queue = line.Select(w => (W: w, Car: new WorkingCar(w.Guid, w.Spotted ?? now, w.Ready))).ToList();
+                var finished = IndustryWork.Advance(queue.Select(q => q.Car), daysPerCar, now);
+                foreach (var (w, car) in queue)
+                {
+                    w.Spotted = car.Spotted;
+                    w.Ready = car.Ready;
+                }
+                foreach (var f in finished)
+                {
+                    var w = queue.First(q => q.Car == f).W;
+                    var train = registry?.GetTrainCarByCarGuid(w.Guid);
+                    if (train != null && OnIndustryTrack(train, w))
+                        done.Add((train, w, f.Ready.Value));
+                }
+            }
+            if (done.Count == 0)
+                return 0;
+            var levels = State.Contracts.Where(c => c.Level >= 1 && Economy.Industries.ContainsKey(c.Id)).ToDictionary(c => c.Id, c => c.Level);
+            var carrying = LicenseRules.Carrying();
+            var outbound = new List<(TrainCar, Waybill)>();
+            foreach (var (car, w, ready) in done)
+            {
+                try
+                {
+                    if (Finish(car, w, ready, levels, carrying))
+                        outbound.Add((car, w));
+                }
+                catch (Exception e)
+                {
+                    Main.Error($"contracts: {car.ID} at {w.Next}: finishing its industry work failed; idle until the next service: {e}");
+                    w.Stage = Stage.Idle;
+                    w.Spotted = w.Ready = null;
+                }
+            }
+            var made = SendOut(outbound);
+            Main.Log($"contracts: industries done with {done.Count} car(s) ({string.Join(", ", done.Select(d => $"{d.Car.ID} {(d.W.Cargo == null ? "emptied" : "loaded")} at {d.W.At}"))}); {made} outbound job(s)");
+            return done.Count;
+        }
+
+        /// <summary>The machine to name as a load's origin or an unload's destination: the one under the car, if it handles that cargo.</summary>
+        private static WarehouseMachine Handling(WarehouseMachine machine, CargoType cargo) =>
+            machine != null && machine.IsCargoSupported(cargo) ? machine : null;
+
+        /// <summary>
+        /// The industry is done with a car: loaded, it is billed on to its load's destination;
+        /// emptied, it goes where an empty is wanted (Contracts.Core IndustryPlanner.RouteFreedEmpty).
+        /// Its bill opens when it was ready. False if it goes idle instead (no license for its load).
+        /// </summary>
+        private bool Finish(TrainCar car, Waybill w, double ready, IReadOnlyDictionary<string, int> levels, Func<string, bool> carrying)
+        {
+            var machine = MachineUnder(car, w);
+            var logic = car.logicCar;
+            w.Spotted = w.Ready = null;
+            if (w.Stage == Stage.BeingLoaded)
+            {
+                w.At = w.Next;
+                if (w.Cargo == null || !Enum.TryParse(w.Cargo, out CargoType cargo) || !carrying(w.Cargo) || logic.CurrentCargoTypeInCar != CargoType.None)
+                {
+                    Main.Log($"contracts: {car.ID} not loaded with {w.Cargo ?? "nothing"} at {w.Next}: {(logic.CurrentCargoTypeInCar != CargoType.None ? "already loaded" : "no license")}; idle");
+                    w.Stage = Stage.Idle;
+                    return false;
+                }
+                logic.LoadCargo(logic.capacity, cargo, Handling(machine, cargo));
+                w.Stage = Economy.IsInterchange(w.Then) ? Stage.ToInterchange : Stage.ToReceiver;
+                w.Next = w.Then;
+                w.Then = null;
+            }
+            else
+            {
+                if (logic.CurrentCargoTypeInCar != CargoType.None)
+                    logic.UnloadCargo(logic.LoadedCargoAmount, logic.CurrentCargoTypeInCar, Handling(machine, logic.CurrentCargoTypeInCar));
+                w.At = w.Next;
+                w.Cargo = null;
+                w.Then = null;
+                var a = IndustryPlanner.RouteFreedEmpty(Economy.Data, levels, w.Guid, car.carLivery?.parentType?.id, w.At,
+                    new SplitMix64(State.Seed + (ulong)Math.Max(0.0, Math.Floor(ready * 1440))), carrying);
+                if (a.Kind == AssignmentKind.EmptyToShipper)
+                {
+                    w.Stage = Stage.ToShipper;
+                    w.Contract = a.Shipper;
+                }
+                else
+                    w.Stage = Stage.ToInterchange;
+                w.Next = a.Destination;
+            }
+            w.Opened = ready;
+            return true;
+        }
+
+        /// <summary>
+        /// Cars an industry is done with go out at once (owner, 2026-11-04: "add it to the outbound
+        /// as soon as it's ready"): each joins an outbound job not yet taken from its track to the
+        /// same place, which is written again with it in it (up to the licenses' train length);
+        /// with none, it gets a job of its own. Returns the jobs made.
+        /// </summary>
+        private int SendOut(List<(TrainCar Car, Waybill W)> cars)
+        {
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var all = new List<(TrainCar Car, Waybill W)>(cars);
+            var mine = new HashSet<Car>(cars.Select(c => c.Car.logicCar));
+            var withdrawn = new HashSet<Job>();
+            foreach (var g in cars.GroupBy(c => (Track: c.Car.logicCar.FrontBogieTrack, Key: JobKey(c.W, c.Car.logicCar.FrontBogieTrack))))
+            {
+                if (g.Key.Track == null || jobs == null || registry == null)
+                    continue;
+                foreach (var other in g.Key.Track.GetCarsFullyOnTrack().Where(c => !mine.Contains(c)))
+                {
+                    var job = jobs.GetJobOfCar(other);
+                    if (job == null || job.State != JobState.Available || withdrawn.Contains(job))
+                        continue;
+                    // Joined only if all its cars are contract cars on this track, going the same way.
+                    var theirs = new List<(TrainCar Car, Waybill W)>();
+                    foreach (var c in JobCars(job))
+                    {
+                        var w = State.Of(c?.carGuid);
+                        if (w == null || c.FrontBogieTrack != g.Key.Track || JobKey(w, g.Key.Track) != g.Key.Key
+                            || !registry.logicCarToTrainCar.TryGetValue(c, out var train) || train == null)
+                        {
+                            theirs = null;
+                            break;
+                        }
+                        theirs.Add((train, w));
+                    }
+                    if (theirs == null || theirs.Count == 0)
+                        continue;
+                    withdrawn.Add(job);
+                    Withdraw(job);
+                    Main.Log($"contracts: job {job.ID} ({theirs.Count} car(s)) written again with the cars just done on {g.Key.Track.ID.FullDisplayID}");
+                    foreach (var t in theirs)
+                        if (mine.Add(t.Car.logicCar))
+                            all.Add(t);
+                }
+            }
+            return Dispatch(all);
+        }
+
+        /// <summary>
+        /// Cars waiting at their industry's station for room on its track (WriteSpot), tried
+        /// again: those that fit now are spotted (Tick, every 15 s).
+        /// </summary>
+        internal void SpotWaiting()
+        {
+            if (Economy?.Data == null || service != null)
+                return;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            if (registry == null || jobs == null)
+                return;
+            var waiting = new List<(TrainCar, Waybill)>();
+            foreach (var w in State.Waybills.Where(w => w.Stage == Stage.Loading || w.Stage == Stage.Unloading))
+            {
+                var car = registry.GetTrainCarByCarGuid(w.Guid);
+                if (car != null && jobs.GetJobOfCar(car.logicCar) == null && WaitsToSpot(car, w))
+                    waiting.Add((car, w));
+            }
+            if (waiting.Count > 0)
+                Dispatch(waiting);
         }
 
         /// <summary>
@@ -749,10 +1381,23 @@ namespace Contracts.Mod.Runtime
                     continue;
                 switch (last.jobType)
                 {
+                    // A freed empty at the shipper it was sent to: it waits there, idle, for the next service.
+                    case JobType.EmptyHaul when w.Stage == Stage.ToShipper && w.Cargo == null:
+                        Close(w);
+                        w.Stage = Stage.Idle;
+                        w.At = w.Next;
+                        w.Next = null;
+                        continue;
                     case JobType.EmptyHaul when w.Stage == Stage.ToShipper:
                         w.Stage = Stage.Loading;
                         w.At = w.Next;
                         break;
+                    // Spotted on its industry's track (StationMoves): the industry's work begins.
+                    case JobType.EmptyHaul when w.Stage == Stage.Loading:
+                    case JobType.Transport when w.Stage == Stage.Unloading:
+                        BeginWork(w);
+                        continue;
+                    // A stock shunting load or unload, written before the industries worked cars themselves.
                     case JobType.ShuntingLoad:
                         // The empty's bill is done; the load's begins.
                         Close(w);

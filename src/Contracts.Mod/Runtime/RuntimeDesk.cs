@@ -21,6 +21,11 @@ namespace Contracts.Mod.Runtime
         private const int ShortLength = 24;
         public const string ShopId = "#locomotives";
         public const string CoachShopId = "#coaches";
+        /// <summary>The list's "Cars without jobs" row (owner, 2026-11-03: cars on an interchange with no job number).</summary>
+        public const string JoblessId = "#jobless";
+
+        /// <summary>Whether a list entry is a contract (not a shop or the jobless cars' row).</summary>
+        public static bool IsContract(string id) => ShopOf(id) == null && id != JoblessId;
 
         /// <summary>The shop a menu entry opens, or null for a contract.</summary>
         public static LocoShop.Kind? ShopOf(string id) =>
@@ -98,6 +103,12 @@ namespace Contracts.Mod.Runtime
             : Industries.TryGetValue(contract.Id, out var i)
                 ? $"{i.Daily(LineRole.Product, level)} / {i.Daily(LineRole.Material, level)} / {i.Daily(LineRole.Waste, level)}"
                 : "";
+
+        public (int Count, string Text) Jobless()
+        {
+            var cars = Rt?.Jobless() ?? new List<JoblessCar>();
+            return (cars.Count, JoblessReport.Paragraph(cars, namesPerGroup: 6));
+        }
 
         public string Legend(ContractView contract) =>
             PassengerService.CityOf(contract.Id) != null ? "Trains a day from the city"

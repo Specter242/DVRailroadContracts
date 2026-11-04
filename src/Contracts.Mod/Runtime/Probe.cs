@@ -7,6 +7,7 @@ using Contracts.Core.Industries;
 using Contracts.Mod.Kiosk;
 using DV;
 using DV.InventorySystem;
+using DV.ServicePenalty.UI;
 using DV.Logic.Job;
 using DV.ThingTypes;
 using DV.ThingTypes.TransitionHelpers;
@@ -106,12 +107,28 @@ namespace Contracts.Mod.Runtime
             yield return new WaitForSeconds(3f);
             Try("jobs", () => JobsCheck(rt, taken));
             yield return Legs(rt, taken);
+            // The industries work the cars spotted, and send them out; the legs then work the outbound.
+            for (var cycle = 0; cycle < 3; cycle++)
+            {
+                var more = false;
+                yield return Work(rt, taken, cycle, m => more = m);
+                yield return Legs(rt, taken);
+                if (!more)
+                    break;
+            }
+            Try("every car between legs has a job, is worked, or waits for room", () => Settled(rt, taken));
+            string moved = null;
+            Try("a set-out car moved off the interchange", () => moved = MoveSetOut(rt, taken));
+            yield return new WaitForSeconds(1f);
+            Try("the desk after the set-out car moved", () => SetOutDesk(rt, moved));
             Try("second service", () => SecondService(rt, taken));
+            Try("the moved car after the second service", () => MovedAfterService(rt, moved));
             yield return new WaitForSeconds(2f);
             Try("jobs after the second service", () => JobsCheck(rt, taken));
             Try("standing", () => StandingCheck(rt, taken));
             yield return PayCheck(rt, taken);
             Try("save round trip", () => SaveCheck(rt));
+            yield return KioskLoad(rt);
             yield return Finish();
         }
 
@@ -271,7 +288,7 @@ namespace Contracts.Mod.Runtime
             Line($"contract: {industry.Id} at level 1: {desk.Volume(offer, 1)} cars a day (out / in / waste)");
             var day = ContractRuntime.DayOf(ContractRuntime.Now ?? DateTime.Now) + 1000;
             serviceDay = day;
-            var summary = rt.Service(day);
+            var summary = SavedMidService(rt, day);
             Line("service: " + summary);
             var placed = rt.State.Waybills.Where(w => w.Contract == industry.Id).ToList();
             Line($"service: {placed.Count} waybill(s) for {industry.Id}: " +
@@ -279,6 +296,59 @@ namespace Contracts.Mod.Runtime
             if (placed.Count == 0)
                 Problem("the service placed no cars");
             return industry.Id;
+        }
+
+        /// <summary>
+        /// A save while the service places its cars (it goes a step a frame): the service is begun
+        /// and its first cut placed, then the game gathers a save. The save finishes the service
+        /// first, so it holds every car placed, every car's bill, and every job. Returns the
+        /// service's summary.
+        /// </summary>
+        private string SavedMidService(ContractRuntime rt, int day)
+        {
+            if (!rt.BeginService(day))
+                return "no economy";
+            var atOnce = rt.CutsAtOnce();
+            rt.StepService();
+            var placedBefore = rt.State.Waybills.Count;
+            var saves = SingletonBehaviour<SaveGameManager>.Instance;
+            HarmonyLib.AccessTools.Method(typeof(SaveGameManager), "UpdateInternalData").Invoke(saves, null);
+            var done = rt.LastService;
+            if (rt.Servicing || done == null || done.Day != day)
+            {
+                Problem("save mid-service: the save did not finish the service under way");
+                rt.FinishService();
+                return rt.LastService?.Summary;
+            }
+            var saved = ContractState.Read(saves.data, out var unreadable);
+            var cars = saves.data.GetJObject(SaveGameKeys.Cars)?.ToString(Newtonsoft.Json.Formatting.None) ?? "";
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var guids = rt.State.Waybills.Select(w => w.Guid).ToList();
+            var notSaved = guids.Count(g => !cars.Contains(g));
+            var billsSaved = saved == null ? -1 : saved.Waybills.Count(w => guids.Contains(w.Guid));
+            var jobless = rt.State.Waybills.Where(w => w.Stage != Stage.Idle && w.Stage != Stage.OffMap)
+                .Count(w => registry.GetTrainCarByCarGuid(w.Guid) is TrainCar c && jobs.GetJobOfCar(c.logicCar) == null);
+            Line($"save mid-service: {placedBefore} bill(s) after the first step; the save finished the service ({done.Work.Run} step(s)): " +
+                 $"{guids.Count} bill(s), {billsSaved} in the saved state (unreadable {unreadable}), {guids.Count - notSaved} of their cars in the saved cars, {jobless} billed car(s) without a job");
+            if (placedBefore >= guids.Count)
+                Problem("save mid-service: the first step placed every car, so the save did not interrupt the placement");
+            if (unreadable || billsSaved != guids.Count || notSaved > 0 || jobless > 0)
+                Problem("save mid-service: the save does not hold the whole service");
+            SameCuts("save mid-service", atOnce, done);
+            return done.Summary;
+        }
+
+        /// <summary>The cuts the steps placed are those the service would have placed at once.</summary>
+        private void SameCuts(string what, List<string> atOnce, ContractRuntime.ServiceRun done)
+        {
+            var same = atOnce != null && atOnce.SequenceEqual(done.Cuts);
+            Line($"{what}: {done.Cuts.Count} cut(s) placed, {(same ? "the same as" : "NOT the same as")} the {atOnce?.Count ?? 0} at once: {string.Join("; ", done.Cuts)}");
+            if (!same)
+            {
+                Line($"{what}: at once would be: {string.Join("; ", atOnce ?? new List<string>())}");
+                Problem($"{what}: the steps placed other cuts than the service at once");
+            }
         }
 
         private void JobsCheck(ContractRuntime rt, string contract)
@@ -356,9 +426,158 @@ namespace Contracts.Mod.Runtime
             }
             var stages = rt.State.Waybills.Where(w => w.Contract == contract).GroupBy(w => w.Stage).Select(g => $"{g.Key} {g.Count()}");
             Line($"legs: {done} job(s) worked; the cars now: {string.Join(", ", stages)}");
-            var stuck = rt.State.Waybills.Count(w => w.Contract == contract && w.Stage != Stage.Idle && w.Stage != Stage.OffMap);
-            if (stuck > 0)
-                Problem($"{stuck} car(s) are still between legs with no job worked to the end");
+            var at = rt.State.Waybills.Count(w => w.Contract == contract && ContractRuntime.Worked(w));
+            if (at > 0)
+                Line($"legs: {at} car(s) at the industry, worked there");
+        }
+
+        /// <summary>The taken contract's cars after the work: none between legs without a job, unless at its industry (worked, or waiting for room).</summary>
+        private void Settled(ContractRuntime rt, string contract)
+        {
+            if (contract == null)
+                return;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var stuck = new List<string>();
+            foreach (var w in rt.State.Waybills.Where(w => w.Contract == contract && w.Stage != Stage.Idle && w.Stage != Stage.OffMap))
+            {
+                var car = registry.GetTrainCarByCarGuid(w.Guid);
+                if (car == null || jobs.GetJobOfCar(car.logicCar) != null || ContractRuntime.Worked(w) && rt.OnIndustryTrack(car, w) || rt.WaitsToSpot(car, w))
+                    continue;
+                stuck.Add($"{car.ID} {w.Stage} on {car.logicCar.FrontBogieTrack?.ID?.FullDisplayID ?? "no track"}");
+            }
+            Line($"settled: {(stuck.Count == 0 ? "every car between legs has a job, is at its industry, or waits for room" : string.Join("; ", stuck))}");
+            if (stuck.Count > 0)
+                Problem($"{stuck.Count} car(s) are between legs with no job: {string.Join("; ", stuck)}");
+        }
+
+        /// <summary>
+        /// The industries' work (design, "Industry work"): the cars the legs spotted are on their
+        /// industry's tracks, each line's cars given ready times a car at a time at the contract's
+        /// rate; done, a car is loaded or emptied and goes out at once, and the next car done on
+        /// the same track for the same place joins its outbound job while it is not yet taken. The
+        /// clock is moved on by hand: a car's ready time is set to now and the work run (the bills
+        /// then open now, not in the future). Then every car is done, and those waiting for room
+        /// are tried again. Tells the caller whether cars may be left to spot.
+        /// </summary>
+        private IEnumerator Work(ContractRuntime rt, string contract, int cycle, Action<bool> more)
+        {
+            more(false);
+            if (contract == null)
+                yield break;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var now = ContractRuntime.Clock ?? 0.0;
+            List<Waybill> Worked() => rt.State.Waybills.Where(w => w.Contract == contract && ContractRuntime.Worked(w)).ToList();
+            TrainCar CarOf(Waybill w) => registry.GetTrainCarByCarGuid(w.Guid);
+            var worked = Worked();
+            if (worked.Count == 0)
+            {
+                if (cycle == 0)
+                    Problem("work: the legs spotted no car at its industry");
+                yield break;
+            }
+            // Their ready times, a car at a time per line.
+            Try("work: ready times", () => rt.WorkIndustries(now));
+            Line($"work (cycle {cycle}): {worked.Count} car(s) at the industry: " + string.Join("; ", worked.OrderBy(w => w.Ready ?? 0).Select(w =>
+            {
+                var car = CarOf(w);
+                return $"{car?.ID} {(w.Stage == Stage.BeingLoaded ? "loaded with " + w.Cargo : "emptied of " + car?.logicCar.CurrentCargoTypeInCar)} " +
+                       $"on {car?.logicCar.FrontBogieTrack?.ID?.FullDisplayID} {(w.Ready is double r ? IndustryWork.When(r, now) : "no ready time")}";
+            })));
+            foreach (var w in worked)
+            {
+                var car = CarOf(w);
+                if (car == null || !rt.OnIndustryTrack(car, w))
+                    Problem($"work: {car?.ID ?? w.Guid} is at its industry but not on its industry track");
+                if (w.Ready == null || w.Ready <= now)
+                    Problem($"work: {car?.ID ?? w.Guid} has no ready time ahead of it");
+                if (w.Opened != null)
+                    Problem($"work: {car?.ID ?? w.Guid} has a bill open while its industry works it");
+            }
+            // A save while they are worked keeps where each is in its work.
+            Try("work: a save while cars are worked", () =>
+            {
+                var data = SaveGameManager.MakeEmptySave();
+                rt.State.Write(data);
+                var back = ContractState.Read(data, out _);
+                var lost = worked.Where(w => back?.Of(w.Guid) is Waybill b ? b.Stage != w.Stage || b.Spotted != w.Spotted || b.Ready != w.Ready : true).ToList();
+                Line($"work: saved and read back: {worked.Count - lost.Count} of {worked.Count} car(s) with their stage, spot and ready times");
+                if (lost.Count > 0)
+                    Problem($"work: {lost.Count} car(s) lost their place in the industry's work through a save");
+            });
+            var desk = KioskMenu.Desk.Jobless();
+            Line($"work: the desk's cars without jobs: {desk.Count}: {desk.Text?.Replace("\n\n", " / ")}");
+
+            // Joining: the first loaded car done, then the next done on the same track for the same place.
+            if (cycle == 0)
+            {
+                var loads = worked.Where(w => w.Stage == Stage.BeingLoaded && w.Ready.HasValue).OrderBy(w => w.Ready).ToList();
+                // Two loads on the same track for the same place, if there are such; else the first.
+                var pair = loads.GroupBy(w => (Track: CarOf(w)?.logicCar.FrontBogieTrack, w.Then)).FirstOrDefault(g => g.Key.Track != null && g.Count() >= 2)?.ToList();
+                var first = pair?[0] ?? loads.FirstOrDefault();
+                var second = pair?[1];
+                if (first != null)
+                {
+                    var cargo = first.Cargo;
+                    first.Ready = now;
+                    Try("work: the first car done", () => rt.WorkIndustries(now));
+                    yield return null;
+                    var car = CarOf(first);
+                    var job = car == null ? null : jobs.GetJobOfCar(car.logicCar);
+                    Line($"work: {car?.ID} done: {car?.logicCar.CurrentCargoTypeInCar} in it, {first.Stage} to {first.Next}, bill opened {first.Opened:F3}; " +
+                         $"job {job?.ID ?? "none"} {job?.jobType} with {(job == null ? 0 : ContractRuntime.JobCars(job).Count())} car(s), {job?.State}");
+                    if (car == null || car.logicCar.CurrentCargoTypeInCar.ToString() != cargo)
+                        Problem($"work: {car?.ID ?? first.Guid} was not loaded with {cargo}");
+                    if (job == null)
+                        Problem("work: a car its industry was done with got no outbound job");
+                    if (second != null && job != null)
+                    {
+                        second.Ready = now;
+                        Try("work: the second car done", () => rt.WorkIndustries(now));
+                        yield return null;
+                        var car2 = CarOf(second);
+                        var job2 = car2 == null ? null : jobs.GetJobOfCar(car2.logicCar);
+                        var joined = job2 != null && jobs.GetJobOfCar(car.logicCar) == job2;
+                        Line($"work: {car2?.ID} done for the same place on the same track: job {job2?.ID ?? "none"} with " +
+                             $"{(job2 == null ? 0 : ContractRuntime.JobCars(job2).Count())} car(s), {(joined ? "joined with" : "apart from")} {car.ID} (its job {job.ID} now {job.State})");
+                        if (!joined)
+                            Problem("work: a car done did not join the outbound job not yet taken from its track to the same place");
+                    }
+                    else
+                        Line("work: no second loaded car for the same place on the same track; joining not seen");
+                }
+                else
+                    Line("work: no car being loaded; the first car out not seen");
+            }
+
+            // The rest done.
+            foreach (var w in Worked())
+                w.Ready = now;
+            var done = 0;
+            Try("work: the rest done", () => done = rt.WorkIndustries(now));
+            yield return null;
+            var left = Worked();
+            var after = worked.Select(w => (W: w, Car: CarOf(w))).Where(x => x.Car != null).Select(x => (x.W, x.Car, Job: jobs.GetJobOfCar(x.Car.logicCar))).ToList();
+            Line($"work: {done} more car(s) done; now " + string.Join(", ", after.GroupBy(x => (x.W.Stage, x.W.Next, Job: x.Job?.jobType.ToString() ?? "no job"))
+                .Select(g => $"{g.Count()} {g.Key.Stage} to {g.Key.Next ?? "-"} ({g.Key.Job})")));
+            if (left.Count > 0)
+                Problem($"work: {left.Count} car(s) still at the industry with their ready time past");
+            foreach (var x in after.Where(x => x.W.Stage == Stage.ToReceiver || x.W.Stage == Stage.ToInterchange || x.W.Stage == Stage.ToShipper))
+                if (x.Job == null)
+                    Problem($"work: {x.Car.ID} went out ({x.W.Stage} to {x.W.Next}) without a job");
+            var emptied = after.Where(x => x.W.Cargo == null && x.Car.logicCar.CurrentCargoTypeInCar != CargoType.None).ToList();
+            if (emptied.Count > 0)
+                Problem($"work: {emptied.Count} car(s) billed empty still hold cargo");
+            var outbound = after.Where(x => x.Job != null).Select(x => x.Job).Distinct().ToList();
+            Line($"work: outbound jobs: {string.Join(", ", outbound.Select(j => $"{j.ID} {j.jobType} {j.chainData?.chainOriginYardId}->{j.chainData?.chainDestinationYardId} {ContractRuntime.JobCars(j).Count()} car(s) wage {j.GetBasePaymentForTheJob():F0}"))}");
+
+            // Waiting for room: tried again now that the track is being cleared.
+            rt.SpotWaiting();
+            var waiting = rt.State.Waybills.Where(w => w.Contract == contract && (w.Stage == Stage.Loading || w.Stage == Stage.Unloading)).ToList();
+            if (waiting.Count > 0)
+                Line($"work: {waiting.Count} car(s) at their industry's station to spot ({waiting.Count(w => CarOf(w) != null && jobs.GetJobOfCar(CarOf(w).logicCar) != null)} with a spot job)");
+            more(waiting.Count > 0);
         }
 
         /// <summary>Takes a job, moves its cars onto its destination and loads or unloads them as its warehouse would.</summary>
@@ -396,27 +615,156 @@ namespace Contracts.Mod.Runtime
                    $"{string.Join("/", after.Select(a => a.Stage).Distinct())}; next {(next.Any() ? string.Join(", ", next) : "none")}";
         }
 
-        // Where the next moved car goes on each track (span), so moved cars line up and never overlap.
-        private readonly Dictionary<RailTrack, double> nextSpan = new Dictionary<RailTrack, double>();
+        // The cars this probe moved onto each track and where (span from, to), so moved cars never overlap.
+        private readonly Dictionary<RailTrack, List<(TrainCar Car, double From, double To)>> placed =
+            new Dictionary<RailTrack, List<(TrainCar Car, double From, double To)>>();
 
-        /// <summary>Moves cars onto a track one after another, from 40 % of its length, behind any moved there before.</summary>
+        /// <summary>
+        /// Moves cars onto a track one after another, from 40 % of its length (or earlier, where
+        /// they wouldn't fit after it: an industry track's room is its free length), into the
+        /// first gap left by the cars this probe moved there before and that are still there.
+        /// </summary>
         private void MoveOnto(List<TrainCar> cars, RailTrack rail)
         {
             var points = rail.GetKinkedPointSet().points;
             var total = points[points.Length - 1].span;
-            if (!nextSpan.TryGetValue(rail, out var span))
-                span = total * 0.4;
+            foreach (var list in placed.Values)
+                list.RemoveAll(x => x.Car == null || cars.Contains(x.Car));
+            if (!placed.TryGetValue(rail, out var here))
+                placed[rail] = here = new List<(TrainCar Car, double From, double To)>();
+            var logic = RailTrackRegistry.LogicToRailTrack.FirstOrDefault(kv => kv.Value == rail).Key;
+            here.RemoveAll(x => x.Car.logicCar.FrontBogieTrack != logic && x.Car.logicCar.RearBogieTrack != logic);
+            var needed = cars.Sum(c => c.InterCouplerDistance + 2.0);
+            var span = here.Count == 0 ? Math.Max(total * 0.05, Math.Min(total * 0.4, total - needed - 25.0)) : Math.Max(12.0, total * 0.03);
             foreach (var car in cars)
             {
-                var at = span + car.InterCouplerDistance / 2.0;
+                var length = car.InterCouplerDistance;
+                // Past every car already there that this one would overlap.
+                for (var moved = true; moved;)
+                {
+                    moved = false;
+                    foreach (var x in here)
+                        if (span < x.To + 2.0 && span + length > x.From - 2.0)
+                        {
+                            span = x.To + 2.0;
+                            moved = true;
+                        }
+                }
+                var at = span + length / 2.0;
                 var i = 0;
                 while (i < points.Length - 1 && points[i].span < at)
                     i++;
                 var p = points[i];
                 car.MoveToTrackWithCarUncouple(rail, (Vector3)p.position + DV.OriginShift.OriginShift.currentMove, (Vector3)p.forward);
-                span += car.InterCouplerDistance + 2.0;
+                here.Add((car, span, span + length));
+                span += length + 2.0;
             }
-            nextSpan[rail] = span;
+        }
+
+        /// <summary>
+        /// A car set out for pickup, then moved off the interchange (owner, 2026-11-03: two
+        /// refrigerator cars on the West Interchange with no job number): the desk lists the cars
+        /// without jobs and why, and the next service brings the moved one back to idle instead of
+        /// leaving it waiting for good. Moves one set-out car onto a free storage track of the
+        /// interchange's station; returns its guid.
+        /// </summary>
+        private string MoveSetOut(ContractRuntime rt, string contract)
+        {
+            if (contract == null)
+                return null;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            var before = KioskMenu.Desk.Jobless();
+            Line($"set-out moved: the desk's cars without jobs before: {before.Count}: {before.Text?.Replace("\n\n", " | ")}");
+            var setOut = rt.State.Waybills.Where(w => w.Contract == contract && w.Stage == Stage.OffMap)
+                .Select(w => (W: w, Car: registry.GetTrainCarByCarGuid(w.Guid)))
+                .Where(x => x.Car != null && InterchangeYards.IsInterchangeTrack(x.Car.logicCar.FrontBogieTrack)).ToList();
+            if (setOut.Count == 0)
+            {
+                Line("set-out moved: no car set out for pickup to move");
+                return null;
+            }
+            if (before.Count < setOut.Count || before.Text == null || !setOut.All(x => before.Text.Contains(x.Car.ID)) || !before.Text.Contains("pickup"))
+                Problem("set-out moved: the desk does not list the cars set out for pickup");
+            var (w0, car) = setOut[0];
+            var station = Economy.Station(InterchangeYards.StationOf(InterchangeYards.InterchangeOf(car.logicCar.FrontBogieTrack)));
+            var length = SingletonBehaviour<CarSpawner>.Instance.GetTotalTrainCarsLength(new List<Car> { car.logicCar }, true);
+            var track = station?.logicStation?.yard?.StorageTracks
+                .FirstOrDefault(t => t.GetCarsFullyOnTrack().Count == 0 && t.GetCarsPartiallyOnTrack().Count == 0 && organizer.GetFreeSpaceOnTrack(t) > length + 20.0);
+            var rail = track != null && RailTrackRegistry.LogicToRailTrack.TryGetValue(track, out var r) ? r : null;
+            if (rail == null)
+            {
+                Problem($"set-out moved: no free storage track at {station?.stationInfo?.YardID ?? "?"} to move {car.ID} to");
+                return null;
+            }
+            MoveOnto(new List<TrainCar> { car }, rail);
+            Line($"set-out moved: {car.ID} from the interchange to {track.ID.FullDisplayID}");
+            return w0.Guid;
+        }
+
+        /// <summary>
+        /// A second after the move (its bogies on the new track): the desk says the car was moved
+        /// off the interchange, and the list's "Cars without jobs" row opens them all.
+        /// </summary>
+        private void SetOutDesk(ContractRuntime rt, string guid)
+        {
+            if (guid == null)
+                return;
+            var car = SingletonBehaviour<TrainCarRegistry>.Instance.GetTrainCarByCarGuid(guid);
+            if (car == null)
+            {
+                Problem("set-out moved: the moved car is gone");
+                return;
+            }
+            var w0 = rt.State.Of(guid);
+            var after = KioskMenu.Desk.Jobless();
+            Line($"set-out moved: the desk now: {after.Text?.Replace("\n\n", " | ")}");
+            var group = after.Text?.Split(new[] { "\n\n" }, StringSplitOptions.None).FirstOrDefault(g => g.StartsWith("Moved off the interchange"));
+            if (group == null || !group.Contains(car.ID))
+                Problem("set-out moved: the desk does not say the car was moved off the interchange");
+
+            // At a kiosk: the list's "Cars without jobs" row, with their count, opens the paragraph.
+            var main = Resources.FindObjectsOfTypeAll<CareerManagerMainScreen>().FirstOrDefault(m => m.gameObject.scene.IsValid() && KioskMenu.TryGet(m, out _));
+            if (main == null || !KioskMenu.TryGet(main, out var x))
+            {
+                Problem("set-out moved: no kiosk with Contracts");
+                return;
+            }
+            var kiosk = main.screenSwitcher;
+            kiosk.SetActiveDisplay(main);
+            kiosk.SetActiveDisplay(x.List);
+            var row = x.List.Entries.ToList().FindIndex(e => e.Id == RuntimeDesk.JoblessId);
+            Line($"set-out moved: the list: {string.Join("; ", x.List.Shown())}");
+            if (row < 0 || x.List.Entries[row].OpenWaybills != after.Count)
+            {
+                Problem("set-out moved: the list has no 'Cars without jobs' row with their count");
+                return;
+            }
+            for (var i = 0; i < row; i++)
+                kiosk.HandleInput(InputAction.Down);
+            kiosk.HandleInput(InputAction.Confirm);
+            var info = kiosk.CurrentScreen as CareerManagerInfoScreen;
+            Line($"set-out moved: the row opens {kiosk.CurrentScreen?.GetType().Name}: '{info?.title.text}' / '{info?.paragraph.text.Replace("\n", " | ")}' (overflowing {info?.paragraph.isTextOverflowing})");
+            if (info == null || !info.paragraph.text.Contains(car.ID) || info.paragraph.isTextOverflowing)
+                Problem("set-out moved: the row does not show the cars without jobs in full");
+            kiosk.HandleInput(InputAction.Confirm);
+            if (!ReferenceEquals(kiosk.CurrentScreen, x.List))
+                Problem($"set-out moved: the info screen went back to {kiosk.CurrentScreen?.GetType().Name}, not the list");
+            kiosk.SetActiveDisplay(main);
+            return;
+        }
+
+        /// <summary>The moved set-out car is still on the map, no longer waiting for a pickup that would never come.</summary>
+        private void MovedAfterService(ContractRuntime rt, string guid)
+        {
+            if (guid == null)
+                return;
+            var w = rt.State.Of(guid);
+            var car = SingletonBehaviour<TrainCarRegistry>.Instance.GetTrainCarByCarGuid(guid);
+            var job = car == null ? null : SingletonBehaviour<JobsManager>.Instance.GetJobOfCar(car.logicCar);
+            Line($"set-out moved: after the service, {car?.ID ?? "gone"}: {(w == null ? "no bill" : $"{w.Stage}, next {w.Next ?? "-"}")}; job {job?.ID ?? "none"}");
+            if (car == null || w == null || w.Stage == Stage.OffMap)
+                Problem("set-out moved: the service did not bring the moved car back to idle (or bill it again)");
         }
 
         /// <summary>The next morning's service: cars waiting on interchange tracks leave; idle cars are billed.</summary>
@@ -654,6 +1002,227 @@ namespace Contracts.Mod.Runtime
                         Problem("pay: what was owed was not taken as cash came in");
                 });
             }
+        }
+
+        /// <summary>
+        /// The kiosk under load (a Discord report, 2026-11-03: "huge lag spikes (around 2 s) when
+        /// selecting contracts", on a new save, taking every contract): every license given;
+        /// standing at the West Interchange office's kiosk, the frames watched before any kiosk
+        /// use; five contracts taken through the kiosk with every offer listed, each step timed;
+        /// the rest taken, and midnight timed; the 06:00 service run as the game runs it (begun,
+        /// then a step a frame), its work and the frames meanwhile and after it measured; then each
+        /// kiosk action timed with every contract held, and the frames watched with the list open
+        /// while the cursor moves. A kiosk action or a service step over 100 ms, or a frame over
+        /// 200 ms, is a problem.
+        /// </summary>
+        private IEnumerator KioskLoad(ContractRuntime rt)
+        {
+            var desk = KioskMenu.Desk;
+            var mains = Resources.FindObjectsOfTypeAll<CareerManagerMainScreen>().Where(m => m.gameObject.scene.IsValid() && KioskMenu.TryGet(m, out _)).ToList();
+            var main = mains.FirstOrDefault(m => KioskPlaces.Of(m.screenSwitcher)?.IsInterchange == true) ?? mains.FirstOrDefault();
+            if (desk == null || main == null || !KioskMenu.TryGet(main, out var x))
+            {
+                Problem("kiosk load: no kiosk with the Contracts menu");
+                yield break;
+            }
+            var place = KioskPlaces.Of(main.screenSwitcher);
+            var kiosk = main.screenSwitcher;
+            Try("kiosk load: every license", () =>
+            {
+                var licenses = SingletonBehaviour<LicenseManager>.Instance;
+                foreach (var l in Globals.G.Types.jobLicenses.Where(l => l != null && !licenses.IsJobLicenseAcquired(l)).ToList())
+                    licenses.AcquireJobLicense(l);
+                Line($"kiosk load: {desk.Offers(place).Count} contracts on offer at {place?.Id}, {rt.State.Contracts.Count} held");
+            });
+
+            // Stand at the kiosk, as a player does.
+            var facing = kiosk.transform.TransformDirection(Vector3.left);
+            facing.y = 0f;
+            facing.Normalize();
+            var screen = kiosk.transform.TransformPoint(new Vector3(-0.10f, 1.32f, -0.08f));
+            var stand = screen + facing * 0.8f;
+            stand.y = kiosk.transform.position.y + 0.15f;
+            PlayerManager.TeleportPlayer(stand, Quaternion.LookRotation(-facing, Vector3.up), null, true);
+            yield return new WaitForSeconds(10f);
+
+            var watch = new System.Diagnostics.Stopwatch();
+            double Ms(Action act)
+            {
+                watch.Restart();
+                act();
+                watch.Stop();
+                return watch.Elapsed.TotalMilliseconds;
+            }
+            var slow = new List<string>();
+            void Timed(string what, double ms, double limit = 100.0)
+            {
+                Line($"kiosk load: {what}: {ms:F1} ms");
+                if (ms > limit)
+                    slow.Add($"{what} {ms:F0} ms");
+            }
+            IEnumerator Frames(string what, float seconds, bool pressing)
+            {
+                var start = UnityEngine.Time.realtimeSinceStartup;
+                var next = start;
+                float worst = 0f;
+                var spikes = new List<string>();
+                var frames = 0;
+                while (UnityEngine.Time.realtimeSinceStartup - start < seconds)
+                {
+                    if (pressing && UnityEngine.Time.realtimeSinceStartup >= next)
+                    {
+                        kiosk.HandleInput(InputAction.Down);
+                        next += 0.5f;
+                    }
+                    yield return null;
+                    frames++;
+                    var dt = UnityEngine.Time.unscaledDeltaTime;
+                    worst = Mathf.Max(worst, dt);
+                    if (dt > 0.2f)
+                        spikes.Add($"{dt * 1000f:F0} ms at {UnityEngine.Time.realtimeSinceStartup - start:F1} s");
+                }
+                Line($"kiosk load: frames {what}, {seconds:F0} s: {frames} frames, worst {worst * 1000f:F0} ms; over 200 ms: " +
+                     (spikes.Count == 0 ? "none" : string.Join(", ", spikes)));
+                if (spikes.Count > 0)
+                    slow.Add($"{spikes.Count} frame(s) over 200 ms {what}");
+            }
+
+            yield return Frames("standing at the kiosk, before using it", 15f, false);
+
+            // Taking contracts as a player does, with every offer still listed: open an offer,
+            // confirm its first row (take at level 1), confirm on the confirm screen, back on the list.
+            kiosk.SetActiveDisplay(main);
+            yield return null;
+            Timed("opening the Contracts list, every offer listed", Ms(() => kiosk.SetActiveDisplay(x.List)));
+            yield return null;
+            for (var n = 0; n < 5; n++)
+            {
+                var offer = x.List.Entries.FirstOrDefault(e => e.IsOffer && e.Needs == null);
+                if (offer == null)
+                    break;
+                Timed($"opening offer {n + 1} ({offer.Short})", Ms(() =>
+                {
+                    x.Detail.Show(offer);
+                    kiosk.SetActiveDisplay(x.Detail);
+                }));
+                yield return null;
+                Timed($"choosing take at level 1 ({offer.Short})", Ms(() => kiosk.HandleInput(InputAction.Confirm)));
+                yield return null;
+                Timed($"confirming the take ({offer.Short})", Ms(() => kiosk.HandleInput(InputAction.Confirm)));
+                yield return null;
+                if (!rt.State.Contracts.Any(c => c.Id == offer.Id) || !ReferenceEquals(kiosk.CurrentScreen, x.List))
+                    Problem($"kiosk load: taking {offer.Id} through the kiosk did not take it and go back to the list");
+            }
+            yield return Frames("after taking contracts through the kiosk", 5f, false);
+            List<string> atOnce = null;
+            Try("kiosk load: every contract", () =>
+            {
+                foreach (var offer in desk.Offers(place).ToList())
+                    desk.Take(offer, 1);
+                rt.State.Day++;
+                Timed("midnight with every contract newly taken", Ms(() => rt.Midnight()));
+                // The 06:00 service as the game runs it: begun now, then a step a frame.
+                Timed("the 06:00 service begun (the sweep, the plan, the bills)", Ms(() => rt.BeginService(serviceDay + 3)));
+                // The check below, in the same frame, before the first step (it is in the first frame's time, not the service's).
+                Line($"kiosk load: the cuts at once worked out for the check: {Ms(() => atOnce = rt.CutsAtOnce()):F1} ms");
+            });
+            {
+                var start = UnityEngine.Time.realtimeSinceStartup;
+                var frames = 0;
+                float worst = 0f;
+                var spikes = new List<string>();
+                var all = new List<float>();
+                while (rt.Servicing && UnityEngine.Time.realtimeSinceStartup - start < 60f)
+                {
+                    yield return null;
+                    frames++;
+                    var dt = UnityEngine.Time.unscaledDeltaTime;
+                    all.Add(dt);
+                    worst = Mathf.Max(worst, dt);
+                    if (dt > 0.2f)
+                        spikes.Add($"{dt * 1000f:F0} ms at frame {frames}");
+                }
+                // A few frames after it, where the last steps' cars and jobs settle.
+                for (var i = 0; i < 5; i++)
+                {
+                    yield return null;
+                    all.Add(UnityEngine.Time.unscaledDeltaTime);
+                }
+                var done = rt.LastService;
+                if (rt.Servicing || done == null || done.Day != serviceDay + 3)
+                    Problem("kiosk load: the 06:00 service did not finish within a minute");
+                else
+                {
+                    Line($"kiosk load: service: {done.Summary}");
+                    Line($"kiosk load: the service's work: {done.WorkMs:F1} ms in {done.Work.Run} step(s) after the plan, the longest {done.LongestStepMs:F1} ms; " +
+                         $"{frames} frame(s), {UnityEngine.Time.realtimeSinceStartup - start:F2} s; worst frame {worst * 1000f:F0} ms; over 200 ms: " +
+                         (spikes.Count == 0 ? "none" : string.Join(", ", spikes)));
+                    Line("kiosk load: the service's longest steps: " + string.Join("; ", done.Steps.Select((x, i) => (x.What, x.Ms, i))
+                        .OrderByDescending(x => x.Ms).Take(6).Select(x => $"step {x.i + 1} {x.Ms:F1} ms, {x.What ?? "-"}")));
+                    Line("kiosk load: the longest frames (the first is the one the probe paused in): " + string.Join("; ", all.Select((dt, i) => (dt, i))
+                        .OrderByDescending(x => x.dt).Take(6).Select(x => $"frame {x.i + 1} {x.dt * 1000f:F0} ms")));
+                    SameCuts("kiosk load", atOnce, done);
+                    if (done.LongestStepMs > 100.0)
+                        slow.Add($"the service's longest step {done.LongestStepMs:F0} ms");
+                    if (spikes.Count > 0)
+                        slow.Add($"{spikes.Count} frame(s) over 200 ms while the service placed its cars");
+                }
+            }
+            Try("kiosk load: every contract running", () =>
+            {
+                Line($"kiosk load: {rt.State.Contracts.Count} contracts held, {rt.State.Waybills.Count} waybills, " +
+                     $"{SingletonBehaviour<JobsManager>.Instance.currentJobs.Count} jobs taken");
+                rt.State.Day++;
+                Timed("midnight with every contract running", Ms(() => rt.Midnight()));
+            });
+            yield return Frames("after the service", 15f, false);
+            for (var i = 0; i < 3; i++)
+            {
+                Timed($"the desk's own contracts (pass {i + 1})", Ms(() => desk.Mine()));
+                Timed($"the desk's offers (pass {i + 1})", Ms(() => desk.Offers(place)));
+                Timed($"the passenger cities (pass {i + 1})", Ms(() => Passengers.Cities()));
+                Timed($"the licenses held (pass {i + 1})", Ms(() => LicenseRules.HeldIds()));
+                yield return null;
+            }
+            kiosk.SetActiveDisplay(main);
+            yield return null;
+            Timed("opening the Contracts list", Ms(() => kiosk.SetActiveDisplay(x.List)));
+            yield return null;
+            for (var i = 0; i < 5; i++)
+            {
+                Timed($"cursor down {i + 1}", Ms(() => kiosk.HandleInput(InputAction.Down)));
+                yield return null;
+            }
+            var kinds = new (string Name, Func<ContractView, bool> Pick)[]
+            {
+                ("an industry contract of yours", e => !e.IsOffer && Runtime.RuntimeDesk.IsContract(e.Id) && !Runtime.RuntimeDesk.IsPassenger(e.Id) && e.Id != Economy.BridgeId),
+                ("a passenger contract of yours", e => !e.IsOffer && Runtime.RuntimeDesk.IsPassenger(e.Id)),
+                ("the bridge contract", e => e.Id == Economy.BridgeId),
+                ("the locomotive shop", e => e.Id == Runtime.RuntimeDesk.ShopId),
+                ("an offer", e => e.IsOffer),
+            };
+            foreach (var (name, pick) in kinds)
+            {
+                var entry = x.List.Entries.FirstOrDefault(pick);
+                if (entry == null)
+                {
+                    Line($"kiosk load: not in the list: {name}");
+                    continue;
+                }
+                Timed($"opening {name} ({entry.Short})", Ms(() =>
+                {
+                    x.Detail.Show(entry);
+                    kiosk.SetActiveDisplay(x.Detail);
+                }));
+                yield return null;
+                Timed($"back from {name} to the list", Ms(() => kiosk.HandleInput(InputAction.Cancel)));
+                yield return null;
+            }
+            yield return Frames("with the list open, the cursor moving", 15f, true);
+            kiosk.SetActiveDisplay(main);
+            Line($"kiosk load: {(slow.Count == 0 ? "nothing slow" : "slow: " + string.Join("; ", slow))}");
+            if (slow.Count > 0)
+                Problem("kiosk load: " + string.Join("; ", slow));
         }
 
         private IEnumerator Finish()

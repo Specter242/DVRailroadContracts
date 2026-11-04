@@ -49,6 +49,10 @@ namespace Contracts.Mod.Kiosk
             // 2026-11-02: "where do we buy coaches?"), with the spike's stand-in desk too.
             entries.Add(new ContractView { Id = Runtime.RuntimeDesk.ShopId, Short = "Buy locomotives", IsOffer = false });
             entries.Add(new ContractView { Id = Runtime.RuntimeDesk.CoachShopId, Short = "Buy coaches", IsOffer = false });
+            // Contract cars with no job now (set out for the pickup, idle...): a row that says which and why.
+            var jobless = desk.Jobless();
+            if (jobless.Count > 0)
+                entries.Add(new ContractView { Id = Runtime.RuntimeDesk.JoblessId, Short = JoblessTitle, IsOffer = false, OpenWaybills = jobless.Count });
             entries.AddRange(desk.Mine());
             var offered = desk.Offers(place);
             offers = offered.Count;
@@ -70,7 +74,7 @@ namespace Contracts.Mod.Kiosk
             }
             Scroll(IndexOfFirstDisplayedEntry, selector.Current);
             lines.Title.text = place == null ? KioskMenu.Entry : $"{KioskMenu.Entry}: {place.Name}";
-            var mine = entries.Count(e => !e.IsOffer && Runtime.RuntimeDesk.ShopOf(e.Id) == null);
+            var mine = entries.Count(e => !e.IsOffer && Runtime.RuntimeDesk.IsContract(e.Id));
             var message = KioskMenu.TakeMessage();
             var owed = KioskMenu.Desk?.Owed ?? 0.0;
             lines.Info.text = message ?? KioskMenu.Desk?.Notice
@@ -99,7 +103,16 @@ namespace Contracts.Mod.Kiosk
                     kiosk.SetActiveDisplay(main);
                     break;
                 case InputAction.Confirm when selector.HasElements:
-                    detail.Show(entries[IndexOfFirstDisplayedEntry + selector.Current]);
+                    var entry = entries[IndexOfFirstDisplayedEntry + selector.Current];
+                    if (entry.Id == Runtime.RuntimeDesk.JoblessId)
+                    {
+                        // Which cars, why, and when each is dealt with: on the info screen, back here after.
+                        var info = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
+                        KioskMenu.ShowInfo(info, this, JoblessTitle, KioskMenu.Desk?.Jobless().Text ?? "Every contract car has a job.");
+                        kiosk.SetActiveDisplay(info);
+                        break;
+                    }
+                    detail.Show(entry);
                     kiosk.SetActiveDisplay(detail);
                     break;
             }
@@ -118,10 +131,14 @@ namespace Contracts.Mod.Kiosk
             lines.ClearRows(System.Math.Max(shown, 0));
         }
 
+        public const string JoblessTitle = "Cars without jobs";
+
         internal static string Value(ContractView c)
         {
             if (Runtime.RuntimeDesk.ShopOf(c.Id) != null)
                 return "shop";
+            if (c.Id == Runtime.RuntimeDesk.JoblessId)
+                return $"{c.OpenWaybills}";
             if (c.IsOffer)
                 return c.Needs != null ? "locked" : "offer";
             if (c.Level == 0)

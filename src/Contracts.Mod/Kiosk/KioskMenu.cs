@@ -17,6 +17,10 @@ namespace Contracts.Mod.Kiosk
     /// selected and highlighted like the stock four. Confirming it opens the Contracts list,
     /// one of two screens the mod adds beside the stock ones. A kiosk whose display has no
     /// such line keeps its stock menu.
+    ///
+    /// With Career Manager API active, that mod builds every kiosk's main menu from its own list
+    /// and takes the menu's input, so Contracts goes on its list instead, last
+    /// (<see cref="CareerManagerApi"/>): the entry is the API's, the screens behind it are the same.
     /// </summary>
     internal static class KioskMenu
     {
@@ -40,6 +44,7 @@ namespace Contracts.Mod.Kiosk
 
         internal sealed class Extension
         {
+            /// <summary>The menu line this mod added; null when Career Manager API holds the menu.</summary>
             public TextMeshPro Line;
             public ContractsScreen List;
             public ContractScreen Detail;
@@ -62,23 +67,58 @@ namespace Contracts.Mod.Kiosk
                 return;
             }
             var line = LineBelow(kiosk, main.fees, main.stats, selectable);
-            var lines = KioskLines.From(kiosk);
-            var choice = kiosk.GetComponentInChildren<CareerManagerCustomActionChoiceScreen>(true);
-            var info = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
-            if (line == null || lines == null || choice == null || info == null)
+            if (line == null)
             {
-                Main.Warn($"kiosk {Where(kiosk)}: {(line == null ? "no free line below Stats" : "screens not as expected")}; Contracts left out");
+                Main.Warn($"kiosk {Where(kiosk)}: no free line below Stats; Contracts left out");
                 return;
             }
+            if (!HasScreens(main))
+                return;
             t.Field("selectableText").SetValue(selectable.Concat(new[] { line }).ToArray());
             t.Field("selector").SetValue(new IntIterator(0, 5, isWrappable: true));
             t.Field("activeSlotCount").SetValue(5);
-            var screens = new GameObject("Contracts");
+            var screens = new GameObject(Entry);
             screens.transform.SetParent(main.transform.parent, false);
-            var list = screens.AddComponent<ContractsScreen>();
-            var detail = screens.AddComponent<ContractScreen>();
+            Attach(main, line, screens.AddComponent<ContractsScreen>());
+        }
+
+        /// <summary>
+        /// Contracts on a kiosk whose main menu Career Manager API holds: its last entry, which
+        /// opens the Contracts list (the API makes the list's object; the detail screen goes
+        /// beside it). A Multiplayer client's entry says the host manages the contracts.
+        /// </summary>
+        internal static void ExtendThrough(CareerManagerMainScreen main, Func<ContractsScreen> addEntry)
+        {
+            if (main == null || extensions.TryGetValue(main, out _) || !HasScreens(main))
+                return;
+            var list = addEntry();
+            if (list == null)
+            {
+                Main.Warn($"kiosk {Where(main.screenSwitcher)}: Career Manager API did not take the Contracts entry; Contracts left out");
+                return;
+            }
+            Attach(main, null, list);
+        }
+
+        private static bool HasScreens(CareerManagerMainScreen main)
+        {
+            var kiosk = main.screenSwitcher;
+            if (KioskLines.From(kiosk) != null && kiosk.GetComponentInChildren<CareerManagerCustomActionChoiceScreen>(true) != null
+                && kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true) != null)
+                return true;
+            Main.Warn($"kiosk {Where(kiosk)}: screens not as expected; Contracts left out");
+            return false;
+        }
+
+        /// <summary>The Contracts list and its detail screen (beside it, on its object), for a kiosk's main menu.</summary>
+        private static void Attach(CareerManagerMainScreen main, TextMeshPro line, ContractsScreen list)
+        {
+            var kiosk = main.screenSwitcher;
+            var lines = KioskLines.From(kiosk);
+            var detail = list.gameObject.AddComponent<ContractScreen>();
             list.Init(kiosk, main, detail, lines);
-            detail.Init(kiosk, list, choice, info, lines);
+            detail.Init(kiosk, list, kiosk.GetComponentInChildren<CareerManagerCustomActionChoiceScreen>(true),
+                kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true), lines);
             extensions.Add(main, new Extension { Line = line, List = list, Detail = detail });
         }
 
@@ -137,7 +177,9 @@ namespace Contracts.Mod.Kiosk
         {
             try
             {
-                KioskMenu.Extend(__instance);
+                // Career Manager API's menu takes Contracts as it starts (CareerManagerApi).
+                if (!CareerManagerApi.Hook())
+                    KioskMenu.Extend(__instance);
             }
             catch (Exception e)
             {
@@ -151,7 +193,7 @@ namespace Contracts.Mod.Kiosk
     {
         private static void Postfix(CareerManagerMainScreen __instance)
         {
-            if (!KioskMenu.TryGet(__instance, out var x))
+            if (!KioskMenu.TryGet(__instance, out var x) || x.Line == null)
                 return;
             x.Line.text = KioskMenu.Entry;
             x.Line.color = __instance.CurrentSelection == 4 ? __instance.screenSwitcher.HIGHLIGHTED_COLOR : __instance.screenSwitcher.REGULAR_COLOR;
@@ -163,7 +205,7 @@ namespace Contracts.Mod.Kiosk
     {
         private static void Postfix(CareerManagerMainScreen __instance)
         {
-            if (KioskMenu.TryGet(__instance, out var x))
+            if (KioskMenu.TryGet(__instance, out var x) && x.Line != null)
                 x.Line.text = string.Empty;
         }
     }
@@ -173,7 +215,7 @@ namespace Contracts.Mod.Kiosk
     {
         private static bool Prefix(CareerManagerMainScreen __instance, InputAction input)
         {
-            if (input != InputAction.Confirm || __instance.CurrentSelection != 4 || !KioskMenu.TryGet(__instance, out var x))
+            if (input != InputAction.Confirm || __instance.CurrentSelection != 4 || !KioskMenu.TryGet(__instance, out var x) || x.Line == null)
                 return true;
             KioskMenu.Open(__instance, x);
             return false;
@@ -185,7 +227,7 @@ namespace Contracts.Mod.Kiosk
     {
         private static bool Prefix(CareerManagerMainScreen __instance, ref string __result)
         {
-            if (__instance.CurrentSelection != 4 || !KioskMenu.TryGet(__instance, out _))
+            if (__instance.CurrentSelection != 4 || !KioskMenu.TryGet(__instance, out var x) || x.Line == null)
                 return true;
             __result = KioskMenu.Entry;
             return false;

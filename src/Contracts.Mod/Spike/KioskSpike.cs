@@ -79,6 +79,11 @@ namespace Contracts.Mod.Spike
             yield return new WaitForSeconds(8f);
             var errorsAtLoad = errors.Count;
             Survey();
+            // Career Manager API (if loaded) starts every kiosk as the world loads: none may throw.
+            var apiErrors = errors.Take(errorsAtLoad).Count(e => e.Contains("CareerManagerAPI") || e.Contains("MainScreen wasn't supplied"));
+            Line($"Career Manager API: {(CareerManagerApi.Active ? "active" : "not active")}; its errors while loading: {apiErrors}");
+            if (apiErrors > 0)
+                Problem($"{apiErrors} Career Manager API error(s) while loading");
             var kiosks = new List<(string Name, DisplayScreenSwitcher Kiosk)>();
             var mf = GameObject.Find("Offices/Offices_w3/MachineFactory");
             if (mf != null)
@@ -101,7 +106,7 @@ namespace Contracts.Mod.Spike
             Line($"errors logged while loading: {errorsAtLoad}; while testing: {errors.Count - errorsAtLoad}");
             foreach (var e in errors.Skip(errorsAtLoad).Distinct().Take(40))
                 Line("  " + e);
-            if (errors.Skip(errorsAtLoad).Any(e => e.Contains("Contracts") || e.Contains("ServicePenalty")))
+            if (errors.Skip(errorsAtLoad).Any(e => e.Contains("Contracts") || e.Contains("ServicePenalty") || e.Contains("CareerManagerAPI")))
                 Problem("errors from the kiosk or this mod while testing");
             Line($"SPIKE DONE: {problems} problem(s)");
             log.Dispose();
@@ -122,7 +127,7 @@ namespace Contracts.Mod.Spike
             foreach (var m in mains.OrderBy(m => KioskMenu.Where(m)))
             {
                 var place = KioskPlaces.Of(m.screenSwitcher);
-                var line = KioskMenu.TryGet(m, out var x) ? x.Line.name : "none";
+                var line = !KioskMenu.TryGet(m, out var x) ? "none" : x.Line != null ? x.Line.name : "Career Manager API's entry";
                 var offers = KioskMenu.Desk?.Offers(place).Count ?? 0;
                 Line($"  {KioskMenu.Where(m)}: place {place?.Id ?? "none"}{(place?.IsInterchange == true ? " (interchange)" : "")}; " +
                      $"menu lines {m.fees?.name}, {m.licenses?.name}, {m.ownedVehicles?.name}, {m.stats?.name}, {line}; offers {offers}");
@@ -177,12 +182,15 @@ namespace Contracts.Mod.Spike
                 yield return new WaitForSeconds(0.3f);
             }
             IEnumerator Shot(string what) => Capture($"spike-{name.Replace(' ', '-')}-{what}", Screen() + Facing() * 0.55f, Screen());
-            string Menu() => string.Join(" | ", new[] { main.fees, main.licenses, main.ownedVehicles, main.stats, x.Line }.Select(t => t.text));
+            // The menu's lines, whichever mod made them: this mod's fifth line, or Career Manager API's list.
+            List<string> MenuLines() => (HarmonyLib.Traverse.Create(main).Field("selectableText").GetValue<TMPro.TextMeshPro[]>() ?? new TMPro.TextMeshPro[0])
+                .Select(t => t == null ? "(gone)" : t.text).ToList();
+            string Menu() => string.Join(" | ", MenuLines());
 
             // 1. The main menu: five entries, Contracts last, reached with Down x4 (and with Up from Fees).
-            Line($"{name}: main menu: {Menu()}");
-            if (x.Line.text != KioskMenu.Entry)
-                Problem($"{name}: the fifth line reads '{x.Line.text}'");
+            Line($"{name}: main menu ({(x.Line != null ? "this mod's line" : "Career Manager API's entry")}): {Menu()}");
+            if (MenuLines().IndexOf(KioskMenu.Entry) != 4 || MenuLines().Count != 5)
+                Problem($"{name}: Contracts is not the fifth and last entry");
             yield return Press(InputAction.Up);
             Line($"{name}: up from Fees selects {main.CurrentSelection} ({main.GetCurrentSelection()})");
             if (main.CurrentSelection != 4)
@@ -320,7 +328,7 @@ namespace Contracts.Mod.Spike
             //    to level 1. Otherwise it is ended, and is offered again where the desk offers it.
             var listed = x.List.Entries.ToList();
             var target = taken != null ? listed.FindIndex(e => !e.IsOffer && e.Id == taken.Id)
-                : listed.FindLastIndex(e => !e.IsOffer && Runtime.RuntimeDesk.ShopOf(e.Id) == null);
+                : listed.FindLastIndex(e => !e.IsOffer && Runtime.RuntimeDesk.IsContract(e.Id));
             var at = x.List.IndexOfFirstDisplayedEntry + x.List.CurrentSelection;
             if (target >= 0 && target != at)
                 yield return Press(target > at ? InputAction.Down : InputAction.Up, Math.Abs(target - at));
@@ -373,6 +381,35 @@ namespace Contracts.Mod.Spike
             yield return Press(InputAction.Cancel);
             if (!(kiosk.CurrentScreen is CareerManagerMainScreen))
                 Problem($"{name}: cancel from Stats did not return to the main menu");
+            // 6. The licenses list names every license it prices (a Discord report, 2026-11-03: the
+            //    first, Dispatcher, showed its price and no name, with Career Manager API).
+            var selected = main.CurrentSelection;
+            yield return Press(selected >= 1 ? InputAction.Up : InputAction.Down, Math.Abs(selected - 1));
+            yield return Press(InputAction.Confirm);
+            var licenses = kiosk.GetComponentInChildren<CareerManagerLicensesScreen>(true);
+            var mode = SingletonBehaviour<DV.UserManagement.UserManager>.Instance?.CurrentUser?.CurrentSession?.GameMode;
+            if (mode != "Career" && kiosk.CurrentScreen is CareerManagerInfoScreen)
+            {
+                // The menu (stock or the API's) keeps Licenses to career saves: open the screen itself.
+                Line($"{name}: Licenses answers a {mode} session with its notice; the licenses screen opened directly");
+                yield return Press(InputAction.Confirm);
+                kiosk.SetActiveDisplay(licenses);
+                yield return new WaitForSeconds(0.3f);
+            }
+            if (!ReferenceEquals(kiosk.CurrentScreen, licenses))
+                Problem($"{name}: the second entry opened {kiosk.CurrentScreen?.GetType().Name}, not the licenses");
+            else
+            {
+                var rows = (HarmonyLib.Traverse.Create(licenses).Field("licenseEntries").GetValue() as IList)?.Cast<object>()
+                    .Select(e => (Name: HarmonyLib.Traverse.Create(e).Field("name").GetValue<TMPro.TextMeshPro>()?.text,
+                                  Status: HarmonyLib.Traverse.Create(e).Field("status").GetValue<TMPro.TextMeshPro>()?.text)).ToList()
+                           ?? new List<(string, string)>();
+                Line($"{name}: licenses: {string.Join("; ", rows.Select(r => $"{(string.IsNullOrEmpty(r.Name) ? "(no name)" : r.Name)} [{r.Status}]"))}");
+                if (rows.Count == 0 || rows.Any(r => string.IsNullOrEmpty(r.Name) && !string.IsNullOrEmpty(r.Status)))
+                    Problem($"{name}: a license row shows a price or status without its name");
+                yield return Shot("licenses");
+                yield return Press(InputAction.Cancel);
+            }
             // A contract taken here stays the player's, to be listed (and ended) at the next kiosk.
             Line($"{name}: done; the player's contracts: {string.Join(", ", KioskMenu.Desk.Mine().Select(c => c.Short))}");
         }
