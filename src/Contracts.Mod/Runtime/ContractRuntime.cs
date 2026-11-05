@@ -138,6 +138,13 @@ namespace Contracts.Mod.Runtime
             var guid = car != null && car.logicCar != null ? car.logicCar.carGuid : null;
             if (guid == null || State.Of(guid) == null)
                 return;
+            // Persistent Jobs suspending it (FarCarGuard keeps contract cars out; this is in case
+            // one gets through): it comes back, so its bill stays.
+            if (PersistentJobs.Suspending(car))
+            {
+                Main.Warn($"contracts: contract car {car.ID} suspended by Persistent Jobs; its bill kept for when it comes back");
+                return;
+            }
             if (!removing.Remove(guid))
                 Main.Warn($"contracts: contract car {car.ID} was deleted by the game");
             State.Remove(guid);
@@ -351,7 +358,7 @@ namespace Contracts.Mod.Runtime
         /// <summary>A service under way: its steps, what it has placed, and its counts.</summary>
         internal sealed class ServiceRun
         {
-            public int Day, Contracts, Taken, Gone, Idled, Recalled, Withdrawn, Bills, SetOut, Placed, Made;
+            public int Day, Contracts, Taken, Gone, Asleep, Idled, Recalled, Withdrawn, Bills, SetOut, Placed, Made;
             public double? Opened;
             public readonly StagedWork Work = new StagedWork();
             public double WorkMs, LongestStepMs;
@@ -424,6 +431,12 @@ namespace Contracts.Mod.Runtime
             foreach (var w in State.Waybills.ToList())
             {
                 var car = registry?.GetTrainCarByCarGuid(w.Guid);
+                // Held by Persistent Jobs' far-car suspension: out of the world for now, not gone.
+                if (car == null && PersistentJobs.IsSuspended(w.Guid))
+                {
+                    run.Asleep++;
+                    continue;
+                }
                 if (car == null)
                 {
                     State.Remove(w.Guid);
@@ -697,7 +710,8 @@ namespace Contracts.Mod.Runtime
         {
             var run = service;
             var short_ = run.Orders.Sum(r => r.Order.Count - r.Cars.Count);
-            run.Summary = $"service day {run.Day}: {run.Contracts} contract(s) at work; {run.Taken} car(s) taken off the map, {run.Gone} gone, {run.Idled} back to idle, " +
+            run.Summary = $"service day {run.Day}: {run.Contracts} contract(s) at work; {run.Taken} car(s) taken off the map, {run.Gone} gone, " +
+                          (run.Asleep > 0 ? $"{run.Asleep} suspended by Persistent Jobs (kept), " : "") + $"{run.Idled} back to idle, " +
                           (run.Recalled > 0 ? $"{run.Recalled} moved off an interchange back to idle, " : "") + $"{run.Withdrawn} withdrawn; " +
                           $"{run.Bills} bill(s) ({run.SetOut} set out for pickup), {run.Placed} car(s) placed ({short_} short), {run.Made} job(s)";
             Main.Log($"contracts: {run.Summary} (in {run.Work.Run} steps after the plan, {run.WorkMs:F0} ms of work so far, the longest step {run.LongestStepMs:F0} ms)");

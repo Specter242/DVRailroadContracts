@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.6 (2026-11-05)
+
+- Contract cars left on a station's tracks no longer disappear when you drive away. Persistent Jobs' "Suspend far away cars" leaves them alone, and brings back the other cars it put away as you return.
+- The kiosk's "Cars without jobs" goes a page at a time: up and down turn the pages, and the title says which page you're on.
+
 ## 0.1.5 (2026-11-04)
 
 - Coaches cost a third of what they did: a train of 2, 4 or 6 is $40,000, $80,000 or $120,000.

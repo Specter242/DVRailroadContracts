@@ -86,6 +86,48 @@ namespace Contracts.Mod.Runtime
             List<DV.ThingTypes.CargoType> cargoPerCar, Random random, bool forceCargo, Track toTrack) =>
             Call(transport, new object[] { from, startTrack, to, cars, cargoPerCar, random, forceCargo, toTrack }, "transport job");
 
+        // ---------------------------------------------------------- far cars (FarCarOpt)
+
+        private static Type farCars;
+        private static FieldInfo suspended, suspending;
+        private static bool farLooked;
+
+        private static void LookFar()
+        {
+            if (farLooked)
+                return;
+            farLooked = true;
+            farCars = AccessTools.TypeByName("PersistentJobsMod.Optimization.FarCarOpt");
+            suspended = farCars == null ? null : AccessTools.Field(farCars, "SuspendedCarObjects");
+            suspending = farCars == null ? null : AccessTools.Field(farCars, "CurrentTrainCarToSuspend");
+            if (farCars != null && (suspended == null || suspending == null))
+                Main.Warn("Persistent Jobs: its far-car suspension's state not found; a car it suspends may be taken for deleted");
+        }
+
+        /// <summary>Persistent Jobs' far-car suspension (FarCarOpt), if it is there.</summary>
+        internal static Type FarCars
+        {
+            get
+            {
+                LookFar();
+                return farCars;
+            }
+        }
+
+        /// <summary>Whether Persistent Jobs holds a car suspended ("Suspend far away cars"): out of the world, to come back.</summary>
+        public static bool IsSuspended(string guid)
+        {
+            LookFar();
+            return guid != null && suspended?.GetValue(null) is System.Collections.IDictionary held && held.Contains(guid);
+        }
+
+        /// <summary>Whether Persistent Jobs is suspending this car now (its deletion is a suspension, not a loss).</summary>
+        public static bool Suspending(UnityEngine.Object car)
+        {
+            LookFar();
+            return car != null && suspending?.GetValue(null) is UnityEngine.Object current && current == car;
+        }
+
         /// <summary>An empty haul of cars on a track to another station (its storage, or the given track).</summary>
         public static JobChainController EmptyHaul(StationController from, StationController to, Track startTrack, IReadOnlyList<TrainCar> cars,
             Random random, Track toTrack) =>

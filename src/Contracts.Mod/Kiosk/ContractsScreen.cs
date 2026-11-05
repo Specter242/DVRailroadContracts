@@ -107,9 +107,9 @@ namespace Contracts.Mod.Kiosk
                     if (entry.Id == Runtime.RuntimeDesk.JoblessId)
                     {
                         // Which cars, why, and when each is dealt with: on the info screen, back here after.
+                        // A page at a time: up and down turn the pages, confirm comes back here.
                         var info = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
-                        KioskMenu.ShowInfo(info, this, JoblessTitle, KioskMenu.Desk?.Jobless().Text ?? "Every contract car has a job.");
-                        kiosk.SetActiveDisplay(info);
+                        InfoPages.Show(kiosk, info, this, JoblessTitle, KioskMenu.Desk?.Jobless().Text ?? "Every contract car has a job.");
                         break;
                     }
                     detail.Show(entry);

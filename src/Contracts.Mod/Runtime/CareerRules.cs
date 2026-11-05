@@ -70,12 +70,21 @@ namespace Contracts.Mod.Runtime
             return spawned != null;
         }
 
+        /// <summary>
+        /// A station's generator, run as the player arrives, spawns nothing. First the station is
+        /// flagged as spawned (a prefix that can't skip anything, so every other one still runs);
+        /// then Persistent Jobs' own prefix, finding the flag, brings back the cars it suspended
+        /// there (its "Suspend far away cars") and skips the generator. Last, should it not have,
+        /// the generator is skipped here. A prefix that returns false skips every later one that
+        /// can skip the original: this block used to run first and return false, so Persistent
+        /// Jobs never brought a station's cars back (a Nexus bug report, 2026-11-04: cars left on a
+        /// station's tracks disappeared once the player drove away).
+        /// </summary>
         [HarmonyPatch(typeof(StationProceduralJobsController), nameof(StationProceduralJobsController.TryToGenerateJobs))]
-        private static class NoStationSpawning
+        private static class FlagStationSpawned
         {
-            // First, so Persistent Jobs' own prefix finds the flag set and only resumes the station's far cars.
             [HarmonyPriority(Priority.First)]
-            private static bool Prefix(StationProceduralJobsController __instance)
+            private static void Prefix(StationProceduralJobsController __instance)
             {
                 try
                 {
@@ -87,8 +96,14 @@ namespace Contracts.Mod.Runtime
                 {
                     Main.Error($"flagging a station as spawned failed: {e.Message}");
                 }
-                return false;
             }
+        }
+
+        [HarmonyPatch(typeof(StationProceduralJobsController), nameof(StationProceduralJobsController.TryToGenerateJobs))]
+        private static class NoStationSpawning
+        {
+            [HarmonyPriority(Priority.Last)]
+            private static bool Prefix() => false;
         }
 
         /// <summary>
@@ -135,7 +150,8 @@ namespace Contracts.Mod.Runtime
         /// A contract car, or one of the player's coaches (a passenger contract's: Persistent Jobs
         /// would take a jobless coach marked unused as its own, and give it its own work).
         /// </summary>
-        private static bool Protected(Car car)
+        /// <summary>A car the game and other mods must leave alone: a contract car, or one of the player's coaches.</summary>
+        internal static bool Protected(Car car)
         {
             if (car == null)
                 return false;

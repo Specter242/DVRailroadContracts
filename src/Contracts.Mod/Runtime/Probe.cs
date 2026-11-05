@@ -121,12 +121,14 @@ namespace Contracts.Mod.Runtime
             Try("a set-out car moved off the interchange", () => moved = MoveSetOut(rt, taken));
             yield return new WaitForSeconds(1f);
             Try("the desk after the set-out car moved", () => SetOutDesk(rt, moved));
+            yield return PagingCheck();
             Try("second service", () => SecondService(rt, taken));
             Try("the moved car after the second service", () => MovedAfterService(rt, moved));
             yield return new WaitForSeconds(2f);
             Try("jobs after the second service", () => JobsCheck(rt, taken));
             Try("standing", () => StandingCheck(rt, taken));
             yield return PayCheck(rt, taken);
+            yield return SuspensionCheck(rt, taken);
             Try("save round trip", () => SaveCheck(rt));
             yield return KioskLoad(rt);
             yield return Finish();
@@ -796,6 +798,160 @@ namespace Contracts.Mod.Runtime
             var left = rt.State.Waybills.Count(w => w.Contract == contract && w.Stage == Stage.OffMap);
             if (waiting > 0 && left >= waiting)
                 Problem("the cars waiting on the interchange tracks did not leave");
+        }
+
+        /// <summary>
+        /// The kiosk's info screen a page at a time (InfoPages): a long "Cars without jobs" list
+        /// is laid out in pages, the title says which, up and down turn them and stop at the ends,
+        /// and confirm goes back to the list with the paragraph's layout as it was.
+        /// </summary>
+        private IEnumerator PagingCheck()
+        {
+            var main = Resources.FindObjectsOfTypeAll<CareerManagerMainScreen>().FirstOrDefault(m => m.gameObject.scene.IsValid() && KioskMenu.TryGet(m, out _));
+            if (main == null || !KioskMenu.TryGet(main, out var x))
+            {
+                Problem("paging: no kiosk with Contracts");
+                yield break;
+            }
+            var kiosk = main.screenSwitcher;
+            var info = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
+            var layout = info.paragraph.overflowMode;
+            var reasons = (JoblessReason[])Enum.GetValues(typeof(JoblessReason));
+            var places = new[] { "CMS", "CP", "HB", "IMW", "MF", "SM", "FF", "GF", "WI", "NEI" };
+            var cars = Enumerable.Range(0, 60).Select(i => new JoblessCar($"T-{i:D3}", reasons[i % reasons.Length], places[i % places.Length],
+                reasons[i % reasons.Length] == JoblessReason.BeingLoaded ? "ready tomorrow 08:17" : null)).ToList();
+            var text = JoblessReport.Paragraph(cars, 6);
+            kiosk.SetActiveDisplay(x.List);
+            InfoPages.Show(kiosk, info, x.List, ContractsScreen.JoblessTitle, text);
+            yield return null;
+            var (page, count) = InfoPages.State(info);
+            Line($"paging: {cars.Count} cars in {text.Split(new[] { "\n\n" }, StringSplitOptions.None).Length} groups: page {page} of {count}, title '{info.title.text}', showing page {info.paragraph.pageToDisplay}");
+            if (count < 2 || page != 1 || info.title.text != $"{ContractsScreen.JoblessTitle} 1/{count}")
+                Problem("paging: a long list is not shown in pages from the first");
+            kiosk.HandleInput(InputAction.Down);
+            if (InfoPages.State(info).Page != 2 || info.paragraph.pageToDisplay != 2 || !info.title.text.EndsWith($" 2/{count}"))
+                Problem("paging: down did not turn to the second page");
+            kiosk.HandleInput(InputAction.Up);
+            kiosk.HandleInput(InputAction.Up);
+            if (InfoPages.State(info).Page != 1 || !ReferenceEquals(kiosk.CurrentScreen, info))
+                Problem("paging: up did not stop at the first page on the screen");
+            for (var i = 0; i < count + 2; i++)
+                kiosk.HandleInput(InputAction.Down);
+            Line($"paging: after {count + 2} downs: page {InfoPages.State(info).Page} of {count}, title '{info.title.text}'");
+            if (InfoPages.State(info).Page != count || !ReferenceEquals(kiosk.CurrentScreen, info))
+                Problem("paging: down did not stop at the last page on the screen");
+            kiosk.HandleInput(InputAction.Confirm);
+            yield return null;
+            Line($"paging: confirm: back to {kiosk.CurrentScreen?.GetType().Name}; the paragraph's layout {info.paragraph.overflowMode} (was {layout}); paging {InfoPages.State(info).Count}");
+            if (!ReferenceEquals(kiosk.CurrentScreen, x.List) || info.paragraph.overflowMode != layout || InfoPages.State(info).Count != 0)
+                Problem("paging: confirm did not go back to the list with the info screen as it was");
+            kiosk.SetActiveDisplay(main);
+        }
+
+        /// <summary>
+        /// Persistent Jobs' "Suspend far away cars" (FarCarGuard; a Nexus bug report, 2026-11-04):
+        /// its suspension of a station's cars, forced at MF, leaves the contract cars there and
+        /// takes a plain car; the player's arrival at the station (its generator's run) brings the
+        /// plain car back. With the guard off for one contract car, the car suspended keeps its
+        /// bill, through a service too, and comes back a contract car.
+        /// </summary>
+        private IEnumerator SuspensionCheck(ContractRuntime rt, string contract)
+        {
+            var far = PersistentJobs.FarCars;
+            var mf = Economy.Station("MF");
+            if (far == null || mf == null)
+            {
+                Problem("suspension: no Persistent Jobs far-car suspension or no MF");
+                yield break;
+            }
+            var run = HarmonyLib.AccessTools.Method(far, "RunSuspendCars");
+            var resume = HarmonyLib.AccessTools.Method(far, "ResumeCarsInStation");
+            bool Busy() => (bool)(HarmonyLib.AccessTools.Field(far, "SuspendCoroRunning")?.GetValue(null) ?? false) || (bool)(HarmonyLib.AccessTools.Field(far, "ResumeCoroRunning")?.GetValue(null) ?? false);
+            IEnumerator Settle()
+            {
+                yield return new WaitForSeconds(0.5f);
+                for (var waited = 0f; Busy() && waited < 30f; waited += 0.5f)
+                    yield return new WaitForSeconds(0.5f);
+                yield return new WaitForSeconds(1f);
+            }
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var rails = new HashSet<RailTrack>(mf.AllStationTracks);
+            bool AtMf(TrainCar c) => c?.logicCar?.FrontBogieTrack != null && RailTrackRegistry.LogicToRailTrack.TryGetValue(c.logicCar.FrontBogieTrack, out var r) && rails.Contains(r);
+            var ours = rt.State.Waybills.Select(w => registry.GetTrainCarByCarGuid(w.Guid)).Where(AtMf).ToList();
+            // A plain car (no contract's) on a free storage track of MF, to be suspended and brought back.
+            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            var storage = mf.logicStation.yard.StorageTracks.FirstOrDefault(t => t.GetCarsFullyOnTrack().Count == 0 && t.GetCarsPartiallyOnTrack().Count == 0
+                                                                                  && organizer.GetFreeSpaceOnTrack(t) > 60.0 && RailTrackRegistry.LogicToRailTrack.ContainsKey(t));
+            var livery = Globals.G.Types.carTypes.Where(t => t?.liveries != null).SelectMany(t => t.liveries)
+                .FirstOrDefault(l => l != null && !l.isHidden && l.prefab != null && CarTypes.IsRegularCar(l) && !LocoShop.IsCoach(l));
+            if (ours.Count == 0 || storage == null || livery == null)
+            {
+                Problem($"suspension: nothing to check with ({ours.Count} contract car(s) on MF's tracks, a free storage track {storage != null}, a plain car type {livery != null})");
+                yield break;
+            }
+            var plain = SingletonBehaviour<CarSpawner>.Instance.SpawnCarTypesOnTrack(new List<TrainCarLivery> { livery }, null, RailTrackRegistry.LogicToRailTrack[storage], true, true)?.FirstOrDefault();
+            yield return new WaitForSeconds(1f);
+            var plainGuid = plain?.logicCar?.carGuid;
+            var before = SingletonBehaviour<CarSpawner>.Instance.AllCars.Count;
+            Line($"suspension: {ours.Count} contract car(s) on MF's tracks ({string.Join(", ", ours.Select(c => c.ID))}); a plain {livery.id} {plain?.ID} on {storage.ID.FullDisplayID}; {before} cars in all");
+
+            run.Invoke(null, new object[] { true, new List<StationController> { mf }, null });
+            yield return Settle();
+            var kept = ours.Count(c => c != null && registry.GetTrainCarByCarGuid(c.logicCar.carGuid) != null);
+            var plainAsleep = plainGuid != null && registry.GetTrainCarByCarGuid(plainGuid) == null && PersistentJobs.IsSuspended(plainGuid);
+            Line($"suspension: MF's cars suspended: {kept} of {ours.Count} contract car(s) still there; the plain car {(plainAsleep ? "suspended" : "not suspended")}");
+            if (kept != ours.Count)
+                Problem("suspension: Persistent Jobs suspended contract cars");
+            if (!plainAsleep)
+                Problem("suspension: Persistent Jobs did not suspend the plain car (the check proves nothing)");
+
+            // The player's arrival: the station's generator runs; Persistent Jobs brings its cars back, and nothing spawns.
+            mf.ProceduralJobsController.TryToGenerateJobs();
+            yield return Settle();
+            var plainBack = plainGuid != null && registry.GetTrainCarByCarGuid(plainGuid) != null;
+            var after = SingletonBehaviour<CarSpawner>.Instance.AllCars.Count;
+            Line($"suspension: arrival at MF: the plain car {(plainBack ? "back" : "still gone")}; {after} cars in all (were {before})");
+            if (!plainBack)
+                Problem("suspension: arriving at MF did not bring back the car Persistent Jobs suspended there");
+            if (after != before)
+                Problem("suspension: arriving at MF spawned or lost cars");
+
+            // A contract car suspended all the same (the guard off): its bill stays, a service on, and it comes back with it.
+            var one = ours.FirstOrDefault(c => c != null && c.trainset != null && c.trainset.cars.Count == 1) ?? ours[0];
+            var set = one.trainset?.cars?.ToList() ?? new List<TrainCar> { one };
+            var guids = set.Select(c => c.logicCar.carGuid).ToList();
+            var oneId = one.ID;
+            var stages = guids.Select(g => rt.State.Of(g)?.Stage.ToString() ?? "no bill").ToList();
+            // Off until Persistent Jobs has done it: its coroutine suspends the cars a frame or more later.
+            FarCarGuard.Guarding = false;
+            try
+            {
+                run.Invoke(null, new object[] { true, new List<StationController>(), set });
+                yield return Settle();
+            }
+            finally
+            {
+                FarCarGuard.Guarding = true;
+            }
+            var asleep = guids.Count(g => registry.GetTrainCarByCarGuid(g) == null && PersistentJobs.IsSuspended(g));
+            var billed = guids.Count(g => rt.State.Of(g) != null);
+            Line($"suspension: {set.Count} contract car(s) ({oneId}'s cut, {string.Join("/", stages)}) suspended with the guard off: {asleep} suspended, {billed} with their bills");
+            if (asleep != set.Count)
+                Problem("suspension: the contract cut was not suspended with the guard off (the check proves nothing)");
+            if (billed != set.Count)
+                Problem("suspension: a contract car suspended by Persistent Jobs lost its bill");
+            serviceDay += 3;
+            var summary = rt.Service(serviceDay);
+            var billedAfter = guids.Count(g => rt.State.Of(g) != null);
+            Line($"suspension: a service with them suspended: {summary}; {billedAfter} of {set.Count} still billed");
+            if (billedAfter != set.Count || summary == null || !summary.Contains("suspended by Persistent Jobs (kept)"))
+                Problem("suspension: the service counted the suspended contract cars as gone");
+            resume.Invoke(null, new object[] { "MF", null });
+            yield return Settle();
+            var back = guids.Count(g => registry.GetTrainCarByCarGuid(g) != null && rt.State.Of(g) != null);
+            Line($"suspension: brought back: {back} of {set.Count} contract car(s) there with their bills ({string.Join("/", guids.Select(g => rt.State.Of(g)?.Stage.ToString() ?? "no bill"))})");
+            if (back != set.Count)
+                Problem("suspension: the contract cars did not come back as contract cars");
         }
 
         private void SaveCheck(ContractRuntime rt)
