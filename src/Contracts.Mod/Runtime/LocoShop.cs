@@ -37,9 +37,12 @@ namespace Contracts.Mod.Runtime
     /// locomotive track (where the game used to spawn free ones) when that is clear, else on the
     /// nearest free storage track (<see cref="Deliver"/>).
     ///
-    /// The price is the game's own value of the vehicle: what it charges to rebuild its body,
-    /// wheels and powertrain, summed over the cars. A custom vehicle without those prices costs
-    /// what the custom car loader asks to unlock it, if it says.
+    /// Prices (Contracts.Core VehiclePricing; owner, 2026-11-04: "the Hudson is over a million
+    /// dollars. I agree the coaches could be cheaper"): the game's own locomotives cost the game's
+    /// value of them (what it charges to rebuild their bodies, wheels and powertrains), its coaches
+    /// a third of theirs; a custom vehicle costs what the stock ones of its kind cost per unit of
+    /// weight, times its weight (steam, other locomotives, cabooses, coaches). A custom one that
+    /// weighs nothing costs its own value, or what the custom car loader asks to unlock it.
     /// </summary>
     internal static class LocoShop
     {
@@ -51,6 +54,11 @@ namespace Contracts.Mod.Runtime
             public List<TrainCarLivery> Cars;
             public float Price;
             public Kind Kind;   // the shop it is sold in: coaches arrive at an interchange
+            public bool Stock;  // one of the game's own vehicles
+            public bool Paired; // a custom locomotive given a tender its mod left out of its set (PairTenders)
+            public float Value; // the game's value of it (ValueOf), before pricing
+            public float Mass;  // its cars' weight together
+            public Contracts.Core.Shop.VehicleKind Priced;
         }
 
         private const int NameLength = 24;
@@ -88,7 +96,7 @@ namespace Contracts.Mod.Runtime
                 if (tender.HasValue && Globals.G.Types.TrainCarType_to_v2.TryGetValue(tender.Value, out var t) && t != null)
                     cars.Add(t);
                 listed.UnionWith(cars);
-                items.AddRange(Sized(kind, name, cars));
+                items.AddRange(Sized(kind, name, cars, true));
             }
             var others = new List<Item>();
             var trailing = new HashSet<TrainCarLivery>();
@@ -99,24 +107,102 @@ namespace Contracts.Mod.Runtime
                 var set = Trainset(livery);
                 var cars = set.Length > 1 && set[0] == livery ? set.ToList() : new List<TrainCarLivery> { livery };
                 trailing.UnionWith(cars.Skip(1));
-                others.AddRange(Sized(kind, NameOf(livery), cars));
+                others.AddRange(Sized(kind, NameOf(livery), cars, false));
             }
             // A unit that comes behind another in its trainset (a B unit) is sold with it.
-            items.AddRange(others.Where(i => !trailing.Contains(i.Cars[0])).OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase));
+            others = others.Where(i => !trailing.Contains(i.Cars[0])).ToList();
+            if (kind == Kind.Locomotives)
+                PairTenders(others, listed);
+            items.AddRange(others.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase));
+            var vehicles = items.ToDictionary(i => i, i => new Contracts.Core.Shop.Vehicle(i.Name, i.Priced, i.Stock, i.Mass, i.Value));
+            var stock = vehicles.Values.Where(v => v.Stock).ToList();
+            foreach (var i in items)
+                i.Price = (float)Contracts.Core.Shop.VehiclePricing.Price(vehicles[i], stock);
             return items;
         }
 
         private static readonly int[] TrainSizes = { 2, 4, 6 };
 
-        /// <summary>A shop's rows for a vehicle: one; for a single coach, a train of each size.</summary>
-        private static IEnumerable<Item> Sized(Kind kind, string name, List<TrainCarLivery> cars)
+        /// <summary>A shop's rows for a vehicle: one; for a single coach, a train of each size. Priced in Catalogue.</summary>
+        private static IEnumerable<Item> Sized(Kind kind, string name, List<TrainCarLivery> cars, bool stock)
         {
+            Item Row(string label, List<TrainCarLivery> list) => new Item
+            {
+                Name = label, Cars = list, Kind = kind, Stock = stock, Value = ValueOf(list),
+                Mass = list.Sum(c => c?.parentType != null ? Math.Max(0f, c.parentType.mass) : 0f), Priced = KindOf(kind, list),
+            };
             if (kind != Kind.Coaches || cars.Count != 1)
-                return new[] { new Item { Name = name, Cars = cars, Price = PriceOf(cars), Kind = kind } };
+                return new[] { Row(name, cars) };
             var stem = name.Length <= NameLength - 3 ? name : name.Substring(0, NameLength - 4).TrimEnd() + ".";
-            return TrainSizes.Select(n => Enumerable.Repeat(cars[0], n).ToList())
-                .Select(train => new Item { Name = $"{stem} x{train.Count}", Cars = train, Price = PriceOf(train), Kind = kind });
+            return TrainSizes.Select(n => Enumerable.Repeat(cars[0], n).ToList()).Select(train => Row($"{stem} x{train.Count}", train));
         }
+
+        /// <summary>
+        /// A custom locomotive sold alone though its mod has a tender for it, left out of its set
+        /// (the C-16's S040F and S040FB): it gets the tender no other row has whose id is its own
+        /// with something after it (S040F, S040FB; FEF-3, "FEF-3 Tender"), or its own with a
+        /// trailing A made B (Jk3A, Jk3B). Without it the locomotive would arrive with no tender.
+        /// </summary>
+        private static void PairTenders(List<Item> rows, HashSet<TrainCarLivery> stock)
+        {
+            var claimed = new HashSet<TrainCarLivery>(stock.Concat(rows.SelectMany(r => r.Cars)));
+            var tenders = Globals.G.Types.carTypes.Where(t => t?.liveries != null).SelectMany(t => t.liveries)
+                .Where(l => l != null && !l.isHidden && l.prefab != null && CarTypes.IsTender(l) && !claimed.Contains(l)).ToList();
+            bool Matches(string loco, string tender) =>
+                tender.Length > loco.Length && tender.StartsWith(loco, StringComparison.OrdinalIgnoreCase)
+                || loco.Length > 1 && char.ToUpperInvariant(loco[loco.Length - 1]) == 'A'
+                   && string.Equals(tender, loco.Substring(0, loco.Length - 1) + "B", StringComparison.OrdinalIgnoreCase);
+            for (var i = 0; i < rows.Count && tenders.Count > 0; i++)
+            {
+                var row = rows[i];
+                if (row.Cars.Count != 1 || !CarTypes.IsLocomotive(row.Cars[0]))
+                    continue;
+                var tender = tenders.FirstOrDefault(t => Matches(row.Cars[0].id, t.id));
+                if (tender == null)
+                    continue;
+                tenders.Remove(tender);
+                var cars = new List<TrainCarLivery> { row.Cars[0], tender };
+                rows[i] = Sized(Kind.Locomotives, row.Name, cars, false).Single();
+                rows[i].Paired = true;
+                if (pairedSaid.Add(row.Cars[0].id))
+                    Main.Log($"shop: {row.Name} ({row.Cars[0].id}) sold with the tender {tender.id}, which its mod leaves out of its set");
+            }
+        }
+
+        private static readonly HashSet<string> pairedSaid = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>What a row is, for its price: a coach, a caboose, a steam locomotive (with a tender in its set, or a firebox), or another locomotive.</summary>
+        private static Contracts.Core.Shop.VehicleKind KindOf(Kind kind, List<TrainCarLivery> cars)
+        {
+            if (kind == Kind.Coaches)
+                return Contracts.Core.Shop.VehicleKind.Coach;
+            var first = cars[0];
+            if (CarTypes.IsCaboose(first))
+                return Contracts.Core.Shop.VehicleKind.Caboose;
+            if (CarTypes.IsSteamLocomotive(first) || cars.Skip(1).Any(CarTypes.IsTender) || HasFirebox(first))
+                return Contracts.Core.Shop.VehicleKind.Steam;
+            return Contracts.Core.Shop.VehicleKind.Locomotive;
+        }
+
+        /// <summary>Whether a livery's car simulates a firebox (a custom steam locomotive without a tender: a tank engine).</summary>
+        private static bool HasFirebox(TrainCarLivery livery)
+        {
+            if (fireboxes.TryGetValue(livery, out var known))
+                return known;
+            bool found;
+            try
+            {
+                found = livery.prefab != null && livery.prefab.GetComponentsInChildren<MonoBehaviour>(true)
+                    .Any(c => c != null && c.GetType().Name == "FireboxDefinition");
+            }
+            catch (Exception)
+            {
+                found = false;
+            }
+            return fireboxes[livery] = found;
+        }
+
+        private static readonly Dictionary<TrainCarLivery, bool> fireboxes = new Dictionary<TrainCarLivery, bool>();
 
         /// <summary>Whether a livery is a coach: it carries passengers and is no locomotive, tender or caboose.</summary>
         internal static bool IsCoach(TrainCarLivery livery) => livery != null && Sells(Kind.Coaches, livery);
@@ -170,8 +256,8 @@ namespace Contracts.Mod.Runtime
             return name.Length <= NameLength ? name : name.Substring(0, NameLength - 1).TrimEnd() + ".";
         }
 
-        /// <summary>The game's value of the cars: rebuilding body, wheels and powertrain, to the nearest $500.</summary>
-        public static float PriceOf(IEnumerable<TrainCarLivery> cars)
+        /// <summary>The game's value of the cars: rebuilding body, wheels and powertrain (a custom car with none of those, what it costs to unlock).</summary>
+        public static float ValueOf(IEnumerable<TrainCarLivery> cars)
         {
             float Part(float p) => p > 0f ? p : 0f;
             var list = cars.ToList();
@@ -180,7 +266,7 @@ namespace Contracts.Mod.Runtime
                   + Part(c.parentType.damage.mechanicalPowertrainPrice) + Part(c.parentType.damage.electricalPowertrainPrice));
             if (sum < 1000f && list.Count > 0 && AccessTools.Field(list[0].GetType(), "UnlockPrice")?.GetValue(list[0]) is float unlock && unlock > sum)
                 sum = unlock;
-            return Mathf.Max(500f, Mathf.Round(sum / 500f) * 500f);
+            return sum;
         }
 
         public static double Money => SingletonBehaviour<Inventory>.Instance?.PlayerMoney ?? 0.0;

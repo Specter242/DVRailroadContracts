@@ -219,7 +219,8 @@ namespace Contracts.Mod.Runtime
             var coaches = LocoShop.Catalogue(LocoShop.Kind.Coaches);
             foreach (var (kind, items) in new[] { ("locomotives", locos), ("coaches", coaches) })
                 foreach (var item in items)
-                    Line($"shop {kind}: {item.Name}: ${item.Price:N0} ({string.Join(" + ", item.Cars.Select(c => $"{c.id} [{c.parentType?.kind?.id}]"))})");
+                    Line($"shop {kind}: {item.Name}: ${item.Price:N0} ({(item.Stock ? "stock" : "custom")} {item.Priced}, game value ${item.Value:N0}, mass {item.Mass:F1}; " +
+                         $"{string.Join(" + ", item.Cars.Select(c => $"{c.id} [{c.parentType?.kind?.id}]"))})");
             var s282 = locos.FirstOrDefault(i => i.Name == "S282");
             if (s282 == null || s282.Cars.Count != 2)
                 Problem("the S282 is not sold with its tender");
@@ -238,6 +239,16 @@ namespace Contracts.Mod.Runtime
                 Problem("custom locomotives with a tender of their own sold without it: " + string.Join(", ", lonelySteam));
             if (coaches.Count < 3)
                 Problem("the stock coaches are not all on sale");
+            // Stock locomotives at the game's value; stock coaches at a third of theirs (VehiclePricing).
+            foreach (var i in locos.Concat(coaches).Where(i => i.Stock))
+            {
+                var expected = Math.Max(500.0, Math.Round((i.Kind == LocoShop.Kind.Coaches ? i.Value / 3.0 : i.Value) / 500.0, MidpointRounding.AwayFromZero) * 500.0);
+                if (Math.Abs(i.Price - expected) > 0.5)
+                    Problem($"{i.Name} costs ${i.Price:N0}, not ${expected:N0}");
+            }
+            var dearest = locos.Where(i => i.Stock).Max(i => i.Price);
+            Line($"shop: custom vehicles against the dearest stock locomotive (${dearest:N0}): " +
+                 string.Join(", ", locos.Concat(coaches).Where(i => !i.Stock).Select(i => $"{i.Name} {i.Price / dearest:F2}x")));
             if (locos.Concat(coaches).Any(i => i.Price < 1000f))
                 Problem("something costs under $1,000: " + string.Join(", ", locos.Concat(coaches).Where(i => i.Price < 1000f).Select(i => i.Name)));
 
@@ -249,6 +260,12 @@ namespace Contracts.Mod.Runtime
             var tendered = locos.FirstOrDefault(i => i.Cars.Count > 1 && i.Cars[0].GetType().Name == "CCL_CarVariant");
             if (tendered != null)
                 buys.Add(tendered);
+            // A custom locomotive given the tender its mod left out of its set arrives with it.
+            var paired = locos.FirstOrDefault(i => i.Paired);
+            if (paired != null)
+                buys.Add(paired);
+            var pairs = string.Join(", ", locos.Where(i => i.Paired).Select(i => $"{i.Name} ({string.Join(" + ", i.Cars.Select(c => c.id))})"));
+            Line($"shop: locomotives given a tender their mod leaves out: {(pairs.Length > 0 ? pairs : "none")}");
             buys.Add(coaches.First());
             foreach (var item in buys)
             {

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.5 (2026-11-04)
+
+- Coaches cost a third of what they did: a train of 2, 4 or 6 is $40,000, $80,000 or $120,000.
+- Custom locomotives and coaches are priced like the stock ones of their kind, by weight, instead of by their own repair values, which ranged from far too cheap to over a million.
+- A custom locomotive whose mod leaves its tender out of its set (the C-16) is sold with the tender.
+
 ## 0.1.4 (2026-11-04)
 
 - Works with Career Manager API: Contracts is on its kiosk menu, last, after Stats.
