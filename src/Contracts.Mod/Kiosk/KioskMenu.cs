@@ -1,5 +1,8 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 using DV.ServicePenalty.UI;
 using HarmonyLib;
@@ -257,6 +260,46 @@ namespace Contracts.Mod.Kiosk
                     return false;
                 }
             }
+        }
+
+        private static bool positionsLooked, positionsFailed;
+        private static PropertyInfo server, players, position, loaded;
+
+        /// <summary>
+        /// Where the players are, on a Multiplayer host: each loaded player's position in the
+        /// scene's frame (the API's IPlayer.Position, the host's own among them, as the Multiplayer
+        /// mod measures a station office's range). None in single player or on a client.
+        /// </summary>
+        public static List<Vector3> PlayerPositions()
+        {
+            var result = new List<Vector3>();
+            try
+            {
+                if (!positionsLooked)
+                {
+                    positionsLooked = true;
+                    server = AccessTools.TypeByName("MPAPI.MultiplayerAPI")?.GetProperty("Server", BindingFlags.Public | BindingFlags.Static);
+                    players = AccessTools.TypeByName("MPAPI.IServer")?.GetProperty("Players");
+                    var player = AccessTools.TypeByName("MPAPI.IPlayer");
+                    position = player?.GetProperty("Position");
+                    loaded = player?.GetProperty("IsLoaded");
+                }
+                var host = server?.GetValue(null);
+                if (host == null || players == null || position == null || !(players.GetValue(host) is IEnumerable all))
+                    return result;
+                foreach (var p in all)
+                    if (p != null && (loaded == null || loaded.GetValue(p) as bool? != false) && position.GetValue(p) is Vector3 at)
+                        result.Add(at);
+            }
+            catch (Exception e)
+            {
+                if (!positionsFailed)
+                {
+                    positionsFailed = true;
+                    Main.Warn($"Multiplayer: the players' positions could not be read ({e.Message}); booklets at the interchange offices come out for the host only");
+                }
+            }
+            return result;
         }
 
         public static string Describe()

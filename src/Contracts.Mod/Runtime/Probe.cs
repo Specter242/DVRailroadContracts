@@ -106,6 +106,7 @@ namespace Contracts.Mod.Runtime
             Try("contract and service", () => taken = ServiceCheck(rt));
             yield return new WaitForSeconds(3f);
             Try("jobs", () => JobsCheck(rt, taken));
+            yield return BookletsCheck(taken);
             yield return Legs(rt, taken);
             // The industries work the cars spotted, and send them out; the legs then work the outbound.
             for (var cycle = 0; cycle < 3; cycle++)
@@ -167,6 +168,78 @@ namespace Contracts.Mod.Runtime
         /// Stands the player at a city station (a passenger station too) for a while: no car, coach,
         /// locomotive or stock job may appear there (design D15, D17).
         /// </summary>
+        /// <summary>
+        /// The interchange offices' booklets come out for any player within range, not only the
+        /// local one (Blaze221, Nexus, 2026-11-05: contracts "spawn only for the host" in
+        /// Multiplayer). The range check counts the local player and, standing in for a
+        /// Multiplayer client, another player the probe places; single player has no Multiplayer
+        /// players. Then, at an office no player is near (the player is at MF), the waiting
+        /// jobs' booklets stay off its table until the stand-in walks up, and are then all laid
+        /// out on it.
+        /// </summary>
+        private IEnumerator BookletsCheck(string contract)
+        {
+            if (contract == null)
+                yield break;
+            var wrong = new List<string>();
+            var here = PlayerManager.PlayerTransform.position;
+            var away = here + new Vector3(0f, 0f, 2000f);
+            if (!InterchangeBooklets.AnyPlayerNear(here))
+                wrong.Add("the local player does not count");
+            if (InterchangeBooklets.AnyPlayerNear(away))
+                wrong.Add("a point 2 km from the player counts");
+            var mp = Kiosk.Multiplayer.PlayerPositions();
+            if (mp.Count != 0)
+                wrong.Add($"{mp.Count} Multiplayer player(s) in single player");
+            InterchangeBooklets.StandIns.Add(away);
+            if (!InterchangeBooklets.AnyPlayerNear(away + new Vector3(100f, 0f, 0f)))
+                wrong.Add("another player 100 m off does not count");
+            InterchangeBooklets.StandIns.Clear();
+
+            // An interchange office no player is near, with jobs of its station waiting there.
+            string office = null;
+            PointOnPlane table = null;
+            StationController station = null;
+            List<Job> waiting = null;
+            HashSet<Job> processed = null;
+            foreach (var interchange in InterchangeYards.All().Keys)
+            {
+                var t = InterchangeBooklets.Table(interchange);
+                var sc = Economy.Station(InterchangeYards.StationOf(interchange));
+                var done = sc == null ? null : HarmonyLib.Traverse.Create(sc).Field("processedNewJobs").GetValue<HashSet<Job>>();
+                if (t == null || done == null || InterchangeBooklets.AnyPlayerNear(t.transform.position))
+                    continue;
+                var jobs = sc.logicStation.availableJobs.Where(j => InterchangeBooklets.InterchangeOf(j) == interchange && !done.Contains(j)).ToList();
+                if (jobs.Count == 0)
+                    continue;
+                (office, table, station, waiting, processed) = (interchange, t, sc, jobs, done);
+                break;
+            }
+            if (office == null)
+            {
+                Problem($"booklets: no interchange office without a player near and with jobs waiting{(wrong.Count > 0 ? "; " + string.Join("; ", wrong) : "")}");
+                yield break;
+            }
+            yield return new WaitForSeconds(1.5f);
+            var early = waiting.Count(processed.Contains);
+            if (early > 0)
+                wrong.Add($"{early} of {waiting.Count} booklet(s) laid out at {office} with no player near");
+            InterchangeBooklets.StandIns.Add(table.transform.position + new Vector3(20f, 0f, 0f));
+            for (var waited = 0f; waited < 10f && !waiting.All(processed.Contains); waited += 0.5f)
+                yield return new WaitForSeconds(0.5f);
+            yield return new WaitForSeconds(0.5f);
+            var at = table.transform.position;
+            InterchangeBooklets.StandIns.Clear();
+            var spawned = HarmonyLib.Traverse.Create(station).Field("spawnedJobOverviews").GetValue<List<JobOverview>>() ?? new List<JobOverview>();
+            var onTable = waiting.Count(j => spawned.Any(o => o != null && o.job == j && (o.transform.position - at).sqrMagnitude < 10f * 10f));
+            if (onTable != waiting.Count)
+                wrong.Add($"{onTable} of {waiting.Count} booklet(s) on {office}'s table with another player there");
+            Line($"booklets: at {office} ({station.stationInfo.YardID}'s jobs), {Vector3.Distance(here, at):F0} m from the player: {early} laid out with no one near; " +
+                 $"{onTable} of {waiting.Count} on its table with another player there ({string.Join(", ", waiting.Select(j => j.ID))}); single player: {mp.Count} Multiplayer player(s)");
+            if (wrong.Count > 0)
+                Problem($"booklets: {string.Join("; ", wrong)}");
+        }
+
         private IEnumerator VisitCity(string yard)
         {
             var station = StationController.allStations.FirstOrDefault(s => s != null && s.stationInfo.YardID == yard);
@@ -703,7 +776,9 @@ namespace Contracts.Mod.Runtime
                 Line("set-out moved: no car set out for pickup to move");
                 return null;
             }
-            if (before.Count < setOut.Count || before.Text == null || !setOut.All(x => before.Text.Contains(x.Car.ID)) || !before.Text.Contains("pickup"))
+            // The desk's text names six cars a line ("and 2 more"); its list has them all.
+            var waiting = new HashSet<string>(rt.Jobless().Where(c => c.Reason == JoblessReason.WaitingForPickup).Select(c => c.Id));
+            if (before.Count < setOut.Count || before.Text == null || !setOut.All(x => waiting.Contains(x.Car.ID)) || !before.Text.Contains("pickup"))
                 Problem("set-out moved: the desk does not list the cars set out for pickup");
             var (w0, car) = setOut[0];
             var station = Economy.Station(InterchangeYards.StationOf(InterchangeYards.InterchangeOf(car.logicCar.FrontBogieTrack)));

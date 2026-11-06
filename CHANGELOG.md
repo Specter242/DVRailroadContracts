@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.7 (2026-11-06)
+
+- Multiplayer: the job booklets at the interchange offices come out for any player there, not only the host.
+
 ## 0.1.6 (2026-11-05)
 
 - Contract cars left on a station's tracks no longer disappear when you drive away. Persistent Jobs' "Suspend far away cars" leaves them alone, and brings back the other cars it put away as you return.

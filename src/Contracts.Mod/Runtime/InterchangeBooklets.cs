@@ -14,9 +14,12 @@ namespace Contracts.Mod.Runtime
     /// tracks belongs to that interchange's station (MF for MF West, IME for IME West), whose
     /// office is far off. Its overview booklet goes on the interchange office's table instead:
     ///
-    /// - laid out as the stock station does it (StationController.Update), one a frame, once the
+    /// - laid out as the stock station does it (StationController.Update), one a frame, once a
     ///   player is within 150 m of the interchange office, and entered in that station's own
-    ///   lists, so the station treats it as its own (taking it, expiring it);
+    ///   lists, so the station treats it as its own (taking it, expiring it). On a Multiplayer
+    ///   host any player counts, as the Multiplayer mod counts any player at a stock station's
+    ///   office (Blaze221, Nexus, 2026-11-05: contracts "spawn only for the host"; up to 0.1.6
+    ///   only the host's own player counted, so a client alone at the office saw no booklets);
     /// - and when the station lays one out itself (the player at its own office), it goes on the
     ///   interchange office's table all the same.
     ///
@@ -60,8 +63,30 @@ namespace Contracts.Mod.Runtime
             return null;
         }
 
+        /// <summary>
+        /// Whether a player is within booklet range (150 m) of a point: the local player, or on a
+        /// Multiplayer host any loaded player.
+        /// </summary>
+        internal static bool AnyPlayerNear(Vector3 at)
+        {
+            if (PlayerManager.PlayerTransform != null && (PlayerManager.PlayerTransform.position - at).sqrMagnitude <= RangeSqr)
+                return true;
+            if (Kiosk.Multiplayer.PlayerPositions().Any(p => (p - at).sqrMagnitude <= RangeSqr))
+                return true;
+#if DEVTOOLS
+            if (StandIns.Any(p => (p - at).sqrMagnitude <= RangeSqr))
+                return true;
+#endif
+            return false;
+        }
+
+#if DEVTOOLS
+        /// <summary>Where the probe stands other players (a Multiplayer client), in the scene's frame.</summary>
+        internal static readonly List<Vector3> StandIns = new List<Vector3>();
+#endif
+
         /// <summary>The booklet table of an interchange's office, found by its name ("[interchange office] MF West").</summary>
-        private static PointOnPlane Table(string interchange)
+        internal static PointOnPlane Table(string interchange)
         {
             if (Tables.TryGetValue(interchange, out var table) && table != null)
                 return table;
@@ -102,7 +127,7 @@ namespace Contracts.Mod.Runtime
             foreach (var interchange in InterchangeYards.All().Keys)
             {
                 var table = Table(interchange);
-                if (table == null || (PlayerManager.PlayerTransform.position - table.transform.position).sqrMagnitude > RangeSqr)
+                if (table == null || !AnyPlayerNear(table.transform.position))
                     continue;
                 var station = Economy.Station(InterchangeYards.StationOf(interchange));
                 if (station?.logicStation == null)
