@@ -2,12 +2,12 @@
   "Id": "Contracts",
   "DisplayName": "Railroad Contracts",
   "Author": "Specter242",
-  "Version": "0.1.7",
+  "Version": "0.1.8",
   "ManagerVersion": "0.27.3",
   "AssemblyName": "Contracts.dll",
   "HomePage": "https://www.nexusmods.com/derailvalley/mods/1816",
   "Repository": "https://raw.githubusercontent.com/Specter242/DVRailroadContracts/main/repository.json",
   "EntryMethod": "Contracts.Mod.Main.Load",
-  "Requirements": [ "PersistentJobsMod", "Interchanges" ],
+  "Requirements": [ "PersistentJobsMod", "Interchanges-0.1.5" ],
   "LoadAfter": [ "Multiplayer", "DVCustomCarLoader", "PersistentJobsMod", "PassengerJobs", "Interchanges" ]
 }

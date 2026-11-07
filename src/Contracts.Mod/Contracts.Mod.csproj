@@ -22,6 +22,7 @@
   <ItemGroup Condition="'$(DevTools)' != 'true'">
     <Compile Remove="Spike/**" />
     <Compile Remove="Runtime/Probe.cs" />
+    <Compile Remove="Runtime/Survey.cs" />
   </ItemGroup>
 
   <!-- Game and loader assemblies are referenced in place and never copied. -->
@@ -42,6 +43,7 @@
     <Reference Include="DV.Inventory" HintPath="$(DvManagedDir)/DV.Inventory.dll" Private="false" />
     <Reference Include="DV.WeatherSystem" HintPath="$(DvManagedDir)/DV.WeatherSystem.dll" Private="false" />
     <Reference Include="DV.RailTrack" HintPath="$(DvManagedDir)/DV.RailTrack.dll" Private="false" />
+    <Reference Include="BezierCurves" HintPath="$(DvManagedDir)/BezierCurves.dll" Private="false" />
     <Reference Include="DV.PointSet" HintPath="$(DvManagedDir)/DV.PointSet.dll" Private="false" />
     <Reference Include="Newtonsoft.Json" HintPath="$(DvManagedDir)/Newtonsoft.Json.dll" Private="false" />
     <Reference Include="DV.OriginShiftInfo" HintPath="$(DvManagedDir)/DV.OriginShiftInfo.dll" Private="false" />

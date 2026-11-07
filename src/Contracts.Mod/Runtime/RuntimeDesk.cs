@@ -48,8 +48,8 @@ namespace Contracts.Mod.Runtime
 
         /// <summary>
         /// Every industry's contract not held, at every kiosk (owner, 2026-11-03: "manage
-        /// contracts without having to travel all over the map"): this place's own first (an
-        /// interchange office's station's), then those the player may take, then those locked
+        /// contracts without having to travel all over the map"): this place's own first (at an
+        /// interchange office, the station's beside it), then those the player may take, then those locked
         /// for want of licenses.
         /// </summary>
         public IReadOnlyList<ContractView> Offers(KioskPlace place)
@@ -57,7 +57,7 @@ namespace Contracts.Mod.Runtime
             if (Rt == null)
                 return new List<ContractView>();
             var here = new HashSet<string>(StringComparer.Ordinal);
-            var station = place == null ? null : place.IsInterchange ? InterchangeYards.StationOf(place.Id) : place.Id;
+            var station = place == null ? null : place.IsInterchange ? InterchangeYards.NeighborOf(place.Id) : place.Id;
             if (station != null)
             {
                 here.Add(station);

@@ -947,7 +947,7 @@ namespace Contracts.Mod.Runtime
             if (SpotLeg(w, track))
             {
                 var cargo = w.Cargo != null && Enum.TryParse(w.Cargo, out CargoType c) ? c : CargoType.None;
-                var tracks = IndustryTracks(Economy.Station(here), cargo).Select(m => m.WarehouseTrack.ID.FullID).Distinct().OrderBy(id => id, StringComparer.Ordinal);
+                var tracks = IndustryTracks(Economy.Station(here), cargo).Select(t => t.ID.FullID).OrderBy(id => id, StringComparer.Ordinal);
                 return $"spot>{w.Next}>{(Loads(w) ? "load" : "unload")}>{string.Join("+", tracks)}";
             }
             switch (w.Stage)
@@ -1039,27 +1039,71 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>
-        /// The warehouse machines (their tracks are the industry's) at a station that handle a
-        /// cargo; for a cargo none handles there (the scrap the mod adds to the mines), all of the
-        /// station's, as the industry loads and unloads its cars itself.
+        /// The tracks at a station where its industry works a cargo (design, "Industry spots"):
+        /// the spot tracks that name it (Contracts.Core IndustrySpots: the Steel Mill's steel under
+        /// its portal crane), else those of the warehouse machines that handle it; for a cargo none
+        /// handles there (the scrap the mod adds to the mines), all of the machines' tracks, as the
+        /// industry loads and unloads its cars itself.
         /// </summary>
-        private static List<WarehouseMachine> IndustryTracks(StationController station, CargoType cargo)
+        internal static List<Track> IndustryTracks(StationController station, CargoType cargo)
         {
             if (station == null || cargo == CargoType.None)
-                return new List<WarehouseMachine>();
-            var yard = station.logicStation.yard;
-            var handling = yard.GetWarehouseMachinesThatSupportCargoTypes(new List<CargoType> { cargo }) ?? new List<WarehouseMachine>();
-            return handling.Count > 0 ? handling : yard.WarehouseMachines?.Where(m => m?.WarehouseTrack != null).ToList() ?? new List<WarehouseMachine>();
+                return new List<Track>();
+            var yardId = station.stationInfo.YardID;
+            var spots = IndustrySpots.TracksFor(yardId, cargo.ToString());
+            if (spots.Count > 0)
+            {
+                var tracks = spots.Select(part => StationTrack(yardId, part)).Where(t => t != null).ToList();
+                if (tracks.Count > 0)
+                    return tracks;
+                if (missingSpots.Add($"{yardId} {cargo}"))
+                    Main.Warn($"contracts: none of {yardId}'s spot tracks for {cargo} ({string.Join(", ", spots)}) is on the map; its warehouse track serves");
+            }
+            return MachineTracks(station, cargo);
         }
 
-        private WarehouseMachine MachineUnder(TrainCar car, Waybill w)
+        /// <summary>
+        /// The tracks of a station's warehouse machines that handle a cargo; for a cargo none
+        /// handles there, all of the machines' tracks. Up to 0.1.7 every cargo was worked there.
+        /// </summary>
+        private static List<Track> MachineTracks(StationController station, CargoType cargo)
+        {
+            var yard = station?.logicStation?.yard;
+            if (yard == null || cargo == CargoType.None)
+                return new List<Track>();
+            var handling = yard.GetWarehouseMachinesThatSupportCargoTypes(new List<CargoType> { cargo }) ?? new List<WarehouseMachine>();
+            var machines = handling.Count > 0 ? handling : yard.WarehouseMachines?.Where(m => m?.WarehouseTrack != null).ToList() ?? new List<WarehouseMachine>();
+            return machines.Select(m => m.WarehouseTrack).Where(t => t != null).Distinct().ToList();
+        }
+
+        private static readonly HashSet<string> missingSpots = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>A station's track by its name within the station ("B7S"), or null.</summary>
+        private static Track StationTrack(string yardId, string part) =>
+            RailTrackRegistry.LogicToRailTrack.Keys.FirstOrDefault(t => t?.ID != null && t.ID.yardId == yardId && t.ID.TrackPartOnly == part);
+
+        /// <summary>
+        /// The track of its industry a car stands on, where its cargo is worked; null if none. A car
+        /// already being worked on one of its industry's warehouse machine tracks for its cargo, as
+        /// every car was spotted up to 0.1.7, is worked there to the end: new cars go to the spots
+        /// (RF audit, 2026-11-06: the owner's career had cars being loaded on the Steel Mill's A7L
+        /// and the Farm's A1L, which would otherwise start over at the next service).
+        /// </summary>
+        private Track SpotUnder(TrainCar car, Waybill w)
         {
             var track = car.logicCar.FrontBogieTrack;
-            return track == null ? null : IndustryTracks(Economy.Station(Economy.StationOf(w.Next)), TrackCargo(car, w)).FirstOrDefault(m => m.WarehouseTrack == track);
+            if (track == null)
+                return null;
+            var station = Economy.Station(Economy.StationOf(w.Next));
+            var cargo = TrackCargo(car, w);
+            var spot = IndustryTracks(station, cargo).FirstOrDefault(t => t == track);
+            if (spot != null || !Worked(w))
+                return spot;
+            return MachineTracks(station, cargo).FirstOrDefault(t => t == track);
         }
 
-        /// <summary>Whether a car stands on a track of its industry that handles its cargo.</summary>
-        internal bool OnIndustryTrack(TrainCar car, Waybill w) => MachineUnder(car, w) != null;
+        /// <summary>Whether a car stands on a track of its industry where its cargo is worked.</summary>
+        internal bool OnIndustryTrack(TrainCar car, Waybill w) => SpotUnder(car, w) != null;
 
         /// <summary>Whether a car with no job waits at its industry's station for room on the industry's track (SpotWaiting).</summary>
         internal bool WaitsToSpot(TrainCar car, Waybill w) =>
@@ -1095,13 +1139,13 @@ namespace Contracts.Mod.Runtime
                 return false;
             }
             var cargo = TrackCargo(cars[0], w);
-            var machines = IndustryTracks(here, cargo);
-            if (machines.Count == 0)
+            var spots = IndustryTracks(here, cargo);
+            if (spots.Count == 0)
             {
                 GoIdle($"no track there {(loading ? "loads" : "unloads")} {cargo}");
                 return false;
             }
-            if (machines.Any(m => m.WarehouseTrack == track))
+            if (spots.Contains(track))
             {
                 foreach (var b in bills)
                     BeginWork(b);
@@ -1109,27 +1153,27 @@ namespace Contracts.Mod.Runtime
                 return false;
             }
             var spawner = SingletonBehaviour<CarSpawner>.Instance;
-            var best = machines.OrderByDescending(m => Room(m.WarehouseTrack)).First();
-            var room = Room(best.WarehouseTrack);
+            var best = spots.OrderByDescending(Room).First();
+            var room = Room(best);
             var fit = 0;
             while (fit < cars.Count && spawner.GetTotalTrainCarsLength(cars.Take(fit + 1).Select(c => c.logicCar).ToList(), true) <= room)
                 fit++;
             foreach (var c in cars.Skip(fit))
                 if (waitingSaid.Add(c.logicCar.carGuid))
-                    Main.Log($"contracts: {c.ID} waits at {here.stationInfo.YardID} for room on {best.WarehouseTrack.ID.FullDisplayID} ({room:F0} m free)");
+                    Main.Log($"contracts: {c.ID} waits at {here.stationInfo.YardID} for room on {best.ID.FullDisplayID} ({room:F0} m free)");
             if (fit == 0)
                 return false;
             var spotted = cars.Take(fit).ToList();
-            var chain = StationMoves.Move(here, track, best.WarehouseTrack, spotted);
+            var chain = StationMoves.Move(here, track, best, spotted, loading);
             if (chain == null)
             {
-                GoIdle("mixed loaded and empty cars");
+                GoIdle(loading ? "loaded or mixed cars to be loaded" : "mixed loaded and empty cars");
                 return false;
             }
             foreach (var c in spotted)
                 waitingSaid.Remove(c.logicCar.carGuid);
             chain.FinalizeSetupAndGenerateFirstJob(false);
-            Main.Log($"contracts: {spotted.Count} car(s) ({string.Join(", ", spotted.Select(c => c.ID))}) to be spotted on {best.WarehouseTrack.ID.FullDisplayID} at {w.Next} " +
+            Main.Log($"contracts: {spotted.Count} car(s) ({string.Join(", ", spotted.Select(c => c.ID))}) to be spotted on {best.ID.FullDisplayID} at {w.Next} " +
                      $"({spawner.GetTotalTrainCarsLength(spotted.Select(c => c.logicCar).ToList(), true):F0} m of {room:F0} m free)");
             return true;
         }
@@ -1155,19 +1199,24 @@ namespace Contracts.Mod.Runtime
             return organizer.GetFreeSpaceOnTrack(track) - pending;
         }
 
-        /// <summary>A freed empty off its industry's track into the station's storage, the track with the most room that holds it; null if none does.</summary>
+        /// <summary>
+        /// A freed empty off its industry's track into the station's storage, the track with the
+        /// most room that holds it: one that is no industry's spot, else (at a station whose
+        /// storage tracks are all spots, as the Sawmill's) another spot; null if none holds it.
+        /// </summary>
         private static JobChainController Pull(List<TrainCar> cars, StationController station, Track track)
         {
             var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
             var length = SingletonBehaviour<CarSpawner>.Instance.GetTotalTrainCarsLength(cars.Select(c => c.logicCar).ToList(), true);
+            var spots = IndustrySpots.TracksAt(station.stationInfo.YardID);
             var into = station.logicStation.yard.StorageTracks.Where(t => t != track && organizer.GetFreeSpaceOnTrack(t) >= length)
-                .OrderByDescending(t => organizer.GetFreeSpaceOnTrack(t)).FirstOrDefault();
+                .OrderBy(t => spots.Contains(t.ID.TrackPartOnly)).ThenByDescending(t => organizer.GetFreeSpaceOnTrack(t)).FirstOrDefault();
             if (into == null)
             {
                 Main.Warn($"contracts: no storage track at {station.stationInfo.YardID} holds {cars.Count} empty car(s) off its industry track");
                 return null;
             }
-            return StationMoves.Move(station, track, into, cars);
+            return StationMoves.Move(station, track, into, cars, forLoading: false);
         }
 
         /// <summary>
@@ -1253,9 +1302,9 @@ namespace Contracts.Mod.Runtime
             return done.Count;
         }
 
-        /// <summary>The machine to name as a load's origin or an unload's destination: the one under the car, if it handles that cargo.</summary>
-        private static WarehouseMachine Handling(WarehouseMachine machine, CargoType cargo) =>
-            machine != null && machine.IsCargoSupported(cargo) ? machine : null;
+        /// <summary>The machine to name as a load's origin or an unload's destination: one of the station's that handles the cargo, wherever the car is worked.</summary>
+        private static WarehouseMachine Handling(StationController station, CargoType cargo) =>
+            station?.logicStation?.yard?.WarehouseMachines?.FirstOrDefault(m => m != null && m.IsCargoSupported(cargo));
 
         /// <summary>
         /// The industry is done with a car: loaded, it is billed on to its load's destination;
@@ -1264,7 +1313,7 @@ namespace Contracts.Mod.Runtime
         /// </summary>
         private bool Finish(TrainCar car, Waybill w, double ready, IReadOnlyDictionary<string, int> levels, Func<string, bool> carrying)
         {
-            var machine = MachineUnder(car, w);
+            var station = Economy.Station(Economy.StationOf(w.Next));
             var logic = car.logicCar;
             w.Spotted = w.Ready = null;
             if (w.Stage == Stage.BeingLoaded)
@@ -1276,7 +1325,7 @@ namespace Contracts.Mod.Runtime
                     w.Stage = Stage.Idle;
                     return false;
                 }
-                logic.LoadCargo(logic.capacity, cargo, Handling(machine, cargo));
+                logic.LoadCargo(logic.capacity, cargo, Handling(station, cargo));
                 w.Stage = Economy.IsInterchange(w.Then) ? Stage.ToInterchange : Stage.ToReceiver;
                 w.Next = w.Then;
                 w.Then = null;
@@ -1284,7 +1333,7 @@ namespace Contracts.Mod.Runtime
             else
             {
                 if (logic.CurrentCargoTypeInCar != CargoType.None)
-                    logic.UnloadCargo(logic.LoadedCargoAmount, logic.CurrentCargoTypeInCar, Handling(machine, logic.CurrentCargoTypeInCar));
+                    logic.UnloadCargo(logic.LoadedCargoAmount, logic.CurrentCargoTypeInCar, Handling(station, logic.CurrentCargoTypeInCar));
                 w.At = w.Next;
                 w.Cargo = null;
                 w.Then = null;

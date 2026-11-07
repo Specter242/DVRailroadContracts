@@ -8,7 +8,10 @@ using Contracts.Mod.Kiosk;
 using DV;
 using DV.InventorySystem;
 using DV.ServicePenalty.UI;
+using DV.Booklets;
+using DV.Localization;
 using DV.Logic.Job;
+using DV.RenderTextureSystem.BookletRender;
 using DV.ThingTypes;
 using DV.ThingTypes.TransitionHelpers;
 using DV.Utils;
@@ -26,6 +29,8 @@ namespace Contracts.Mod.Runtime
     ///   loader's with their tenders), and purchases delivered at the nearest station;
     /// - a contract taken and started, a service run: the cars placed at the interchanges, their
     ///   waybills and their first jobs (types, stations and tracks);
+    /// - each move within a station (StationMoves): its shunting code, and its overview, booklet
+    ///   and reports saying Shunting;
     /// - the contract's standing: the day scored at midnight from its bills, a raise refused
     ///   without three good days and granted with them, a raise asked for refused at midnight
     ///   when the day's score pulls the average down;
@@ -36,8 +41,11 @@ namespace Contracts.Mod.Runtime
     {
         private static string folder;
         private static bool quitAfter;
+        private static bool saveCheck;
         private StreamWriter log;
         private int problems;
+        private int movesChecked;
+        private int interchangePapersChecked;
         private static readonly List<string> errors = new List<string>();
 
         public static void Install(string modFolder)
@@ -47,6 +55,7 @@ namespace Contracts.Mod.Runtime
             if (!File.Exists(trigger))
                 return;
             quitAfter = File.ReadAllText(trigger).IndexOf("quit", StringComparison.OrdinalIgnoreCase) >= 0;
+            saveCheck = File.ReadAllText(trigger).IndexOf("save", StringComparison.OrdinalIgnoreCase) >= 0;
             var go = new GameObject("[contracts probe]");
             DontDestroyOnLoad(go);
             var probe = go.AddComponent<Probe>();
@@ -61,7 +70,7 @@ namespace Contracts.Mod.Runtime
                 if (started)
                     return;
                 started = true;
-                probe.StartCoroutine(probe.Run());
+                probe.StartCoroutine(saveCheck ? probe.SaveRun() : probe.Run());
             };
             Main.Log("probe requested");
         }
@@ -98,6 +107,8 @@ namespace Contracts.Mod.Runtime
             Try("career rules", CareerRulesCheck);
             yield return VisitCity("MF");
             Try("economy", () => EconomyCheck(rt));
+            Try("industry spots", () => SpotsCheck(rt));
+            Try("interchange stations", () => StationsCheck());
             Try("starter", StarterCheck);
             yield return null;
             Try("shop", ShopCheck);
@@ -118,6 +129,10 @@ namespace Contracts.Mod.Runtime
                     break;
             }
             Try("every car between legs has a job, is worked, or waits for room", () => Settled(rt, taken));
+            if (taken != null && movesChecked == 0)
+                Problem("papers: the legs had no move within a station to check");
+            if (taken != null && interchangePapersChecked == 0)
+                Problem("papers: the legs had no job to or from an interchange to check");
             string moved = null;
             Try("a set-out car moved off the interchange", () => moved = MoveSetOut(rt, taken));
             yield return new WaitForSeconds(1f);
@@ -196,7 +211,9 @@ namespace Contracts.Mod.Runtime
                 wrong.Add("another player 100 m off does not count");
             InterchangeBooklets.StandIns.Clear();
 
-            // An interchange office no player is near, with jobs of its station waiting there.
+            // An interchange office no player is near, with jobs waiting there of the station beside
+            // it (written before the interchanges were stations of their own; the interchange
+            // stations lay out their own jobs' booklets, for any player under Multiplayer).
             string office = null;
             PointOnPlane table = null;
             StationController station = null;
@@ -205,7 +222,7 @@ namespace Contracts.Mod.Runtime
             foreach (var interchange in InterchangeYards.All().Keys)
             {
                 var t = InterchangeBooklets.Table(interchange);
-                var sc = Economy.Station(InterchangeYards.StationOf(interchange));
+                var sc = Economy.Station(InterchangeYards.NeighborOf(interchange));
                 var done = sc == null ? null : HarmonyLib.Traverse.Create(sc).Field("processedNewJobs").GetValue<HashSet<Job>>();
                 if (t == null || done == null || InterchangeBooklets.AnyPlayerNear(t.transform.position))
                     continue;
@@ -217,7 +234,14 @@ namespace Contracts.Mod.Runtime
             }
             if (office == null)
             {
-                Problem($"booklets: no interchange office without a player near and with jobs waiting{(wrong.Count > 0 ? "; " + string.Join("; ", wrong) : "")}");
+                var own = InterchangeYards.All().Keys.All(i => InterchangeStations.Is(Economy.Station(InterchangeYards.StationOf(i))));
+                if (own)
+                    Line($"booklets: the range rule checked (single player: {mp.Count} Multiplayer player(s)); no jobs of the stations beside the interchanges start there, " +
+                         "and the interchange stations lay out their own");
+                else
+                    Problem("booklets: no interchange office without a player near and with jobs waiting");
+                if (wrong.Count > 0)
+                    Problem($"booklets: {string.Join("; ", wrong)}");
                 yield break;
             }
             yield return new WaitForSeconds(1.5f);
@@ -271,6 +295,96 @@ namespace Contracts.Mod.Runtime
             Line($"economy: {e?.Industries?.Count ?? 0} industries, data {(e?.Data == null ? "missing" : "built")}");
             if (e?.Data == null)
                 Problem("no economy data");
+        }
+
+        /// <summary>
+        /// Each interchange a station of its own (InterchangeStations; owner, 2026-11-05: "Let's
+        /// get these working as their own industry locations"): the game finds it by its code,
+        /// with its name (by its own translation key), color and booklet table; the interchange's
+        /// tracks are in its yard.
+        /// </summary>
+        private void StationsCheck()
+        {
+            var all = InterchangeYards.All();
+            if (all.Count == 0)
+                Problem("stations: no interchange tracks");
+            foreach (var kv in all)
+            {
+                var code = InterchangeYards.CodeOf(kv.Key);
+                var station = Economy.Station(code);
+                if (station == null || !InterchangeStations.Is(station))
+                {
+                    Problem($"stations: no station {code} for {kv.Key}");
+                    continue;
+                }
+                var info = station.stationInfo;
+                var wrong = new List<string>();
+                if (InterchangeYards.StationOf(kv.Key) != code)
+                    wrong.Add($"its jobs' station is {InterchangeYards.StationOf(kv.Key)}");
+                if (kv.Value.Any(t => t.ID.yardId != code))
+                    wrong.Add($"tracks outside its yard: {string.Join(", ", kv.Value.Where(t => t.ID.yardId != code).Select(t => t.ID.FullDisplayID))}");
+                if (LocalizationAPI.L(info.LocalizationKey) != InterchangeYards.TitleOf(kv.Key) || info.StationColor != InterchangeYards.ColorOf(kv.Key))
+                    wrong.Add($"named '{LocalizationAPI.L(info.LocalizationKey)}' in {info.StationColor}");
+                if (station.logicStation == null || !StationController.allStations.Contains(station) || StationController.GetStationByYardID(code) != station)
+                    wrong.Add("not a station the game knows");
+                if (HarmonyLib.Traverse.Create(station).Field("jobBookletSpawnSurface").GetValue<PointOnPlane>() == null)
+                    wrong.Add("no booklet table");
+                var office = HarmonyLib.Traverse.Create(station).Field("stationRange").GetValue<StationJobGenerationRange>();
+                Line($"stations: {code} '{LocalizationAPI.L(info.LocalizationKey)}' for {kv.Key}: {kv.Value.Count} tracks ({string.Join(", ", kv.Value.Select(t => t.ID.FullDisplayID))}), " +
+                     $"office at {(office == null ? "?" : $"{Math.Sqrt(office.PlayerSqrDistanceFromStationOffice):F0} m from the player")}");
+                // A job saved with Interchange Yards 0.1.4 names the track by its old ID (MF-WI-01-X).
+                var old = $"{InterchangeYards.NeighborOf(kv.Key)}-{code}-01-X";
+                var loader = UnityEngine.Object.FindObjectOfType<JobSaveManager>();
+                var found = loader == null ? null : HarmonyLib.AccessTools.Method(typeof(JobSaveManager), "GetYardTrackWithId", new[] { typeof(string) })?.Invoke(loader, new object[] { old }) as Track;
+                if (found?.ID.FullID != $"{code}-A-01-X")
+                    wrong.Add($"a saved job's track {old} is {found?.ID.FullID ?? "not found"}{(loader == null ? " (no save manager)" : "")}");
+                else
+                    Line($"stations: a saved job's track {old} is {found.ID.FullID}");
+                if (wrong.Count > 0)
+                    Problem($"stations: {code}: {string.Join("; ", wrong)}");
+            }
+        }
+
+        /// <summary>
+        /// Every spot of the table (Contracts.Core IndustrySpots; design, "Industry spots") on the
+        /// map: its tracks are its station's, its cargo is its station's industry's, and the
+        /// runtime sends that cargo to those tracks; a cargo no spot names goes to the warehouse.
+        /// </summary>
+        private void SpotsCheck(ContractRuntime rt)
+        {
+            var industries = rt.Economy?.Industries?.Values.ToList() ?? new List<Core.Industries.Industry>();
+            foreach (var spot in Core.Industries.IndustrySpots.All)
+            {
+                var station = Economy.Station(spot.Station);
+                if (station == null)
+                {
+                    Problem($"spots: no station {spot.Station}");
+                    continue;
+                }
+                var handled = new HashSet<string>(industries.Where(i => i.Station == spot.Station).SelectMany(i => i.Lines).SelectMany(l => l.Cargo));
+                foreach (var cargo in spot.Cargo)
+                {
+                    if (!handled.Contains(cargo))
+                        Problem($"spots: {spot.Station} has no industry line for {cargo}");
+                    if (!Enum.TryParse(cargo, out CargoType type))
+                    {
+                        Problem($"spots: {cargo} is not a cargo");
+                        continue;
+                    }
+                    var tracks = ContractRuntime.IndustryTracks(station, type).Select(t => t.ID.TrackPartOnly).ToList();
+                    if (!tracks.OrderBy(t => t).SequenceEqual(spot.Tracks.OrderBy(t => t)))
+                        Problem($"spots: {spot.Station} {cargo} goes to {string.Join(", ", tracks)}, not {string.Join(", ", spot.Tracks)}");
+                }
+                Line($"spots: {spot.Station} {spot.What}: {string.Join(", ", spot.Tracks)} for {string.Join(", ", spot.Cargo)}");
+            }
+            var sm = Economy.Station("SM");
+            if (sm != null)
+            {
+                var ore = ContractRuntime.IndustryTracks(sm, CargoType.IronOre).Select(t => t.ID.TrackPartOnly).ToList();
+                Line($"spots: SM IronOre (no spot) goes to {string.Join(", ", ore)}");
+                if (!ore.SequenceEqual(new[] { "A7L" }))
+                    Problem("spots: SM's iron ore does not go to its warehouse track, A7L");
+            }
         }
 
         private void StarterCheck()
@@ -490,6 +604,7 @@ namespace Contracts.Mod.Runtime
                 foreach (var job in pending)
                 {
                     var jobCars = cars.Where(c => jobs.GetJobOfCar(c.logicCar) == job).ToList();
+                    Try($"papers of {job.ID}", () => Papers(job));
                     string before = null, outcome = null;
                     try
                     {
@@ -521,6 +636,153 @@ namespace Contracts.Mod.Runtime
             var at = rt.State.Waybills.Count(w => w.Contract == contract && ContractRuntime.Worked(w));
             if (at > 0)
                 Line($"legs: {at} car(s) at the industry, worked there");
+        }
+
+        /// <summary>
+        /// A move within a station (StationMoves; owner, 2026-11-05: they "are labeled as
+        /// logistics and freight haul rather than shunting"): a transport or empty haul between
+        /// two of one station's tracks, neither an interchange's. Its ID has the shunting code,
+        /// and its papers, made as the game makes them, say Shunting in the shunting color: the
+        /// overview, the booklet (cover, front page, then couple, uncouple and validate, numbered
+        /// in order) and the expired and missing-license reports.
+        /// </summary>
+        private void Papers(Job job)
+        {
+            var start = job.tasks.FirstOrDefault()?.GetTaskData().startTrack;
+            var end = ContractRuntime.JobDestination(job);
+            if (InterchangeYards.IsInterchangeTrack(start) || InterchangeYards.IsInterchangeTrack(end))
+            {
+                InterchangePapersCheck(job, start, end);
+                return;
+            }
+            if (job.jobType != JobType.Transport && job.jobType != JobType.EmptyHaul || start == null || end == null
+                || start.ID.yardId != end.ID.yardId || InterchangeYards.IsInterchangeTrack(start) || InterchangeYards.IsInterchangeTrack(end))
+                return;
+            movesChecked++;
+            var kind = StationMoves.KindOf(job.ID, job.jobType);
+            if (kind == null)
+            {
+                Problem($"papers: {job.ID} ({job.jobType}) moves cars within {start.ID.yardId} but has no shunting code");
+                return;
+            }
+            var data = new Job_data(job);
+            List<TemplatePaperData> Made(Type creator, string method, params object[] args) =>
+                (List<TemplatePaperData>)HarmonyLib.AccessTools.Method(creator, method, args.Select(a => a.GetType()).ToArray()).Invoke(null, args);
+            var overview = BookletCreator_JobOverview.GetJobOverviewTemplateData(data);
+            var booklet = Made(typeof(BookletCreator_Job), "GetBookletTemplateData", data);
+            var expired = Made(typeof(BookletCreator_JobExpiredReport), "GetJobExpiredTemplateData", data);
+            var missing = Made(typeof(BookletCreator_JobMissingLicense), "GetMissingLicenseTemplateData", data, true);
+            var name = C.SHUNTING_JOB_TYPE_NAME;
+            var color = C.SHUNTING_UNLOAD_JOB_TYPE_COLOR;
+            var wrong = new List<string>();
+            void Expect(bool ok, string what)
+            {
+                if (!ok)
+                    wrong.Add(what);
+            }
+            var fronts = overview.Concat(booklet).OfType<FrontPageTemplatePaperData>().ToList();
+            Expect(fronts.Count == 2, $"{fronts.Count} front pages, not 2");
+            foreach (var f in fronts)
+            {
+                Expect(f.jobType == name && f.jobTypeColor == color, $"a front page says {f.jobType}");
+                Expect(f.jobDescription == MovePapers.Description(kind.Value, f.distinctCargoTypes), $"a front page's description is '{f.jobDescription}'");
+            }
+            Expect(booklet.OfType<CoverPageTemplatePaperData>().All(c => c.jobType == LocalizationAPI.L("job/shunting_job_cover_page")), "the cover does not say shunting");
+            var kinds = booklet.Select(p => p is TaskTemplatePaperData t ? t.taskType : p.GetType().Name.Replace("TemplatePaperData", "")).ToList();
+            var expected = new[] { "CoverPage", "FrontPage", LocalizationAPI.L("job/task_type_couple"), LocalizationAPI.L("job/task_type_uncouple"), "ValidateJobTask" };
+            Expect(kinds.SequenceEqual(expected), $"the booklet's pages are {string.Join(", ", kinds)}");
+            var numbers = booklet.Select(p => p is CoverPageTemplatePaperData c ? c.pageNumber + "/" + c.totalPages
+                : p is FrontPageTemplatePaperData f ? f.pageNumber + "/" + f.totalPages
+                : p is TaskTemplatePaperData t ? t.pageNumber + "/" + t.totalPages + " step " + t.stepNum
+                : p is ValidateJobTaskTemplatePaperData v ? v.pageNumber + "/" + v.totalPages + " step " + v.stepNum : "?").ToList();
+            var n = booklet.Count;
+            Expect(numbers.SequenceEqual(new[] { $"1/{n}", $"2/{n}", $"3/{n} step 1", $"4/{n} step 2", $"5/{n} step 3" }), $"the booklet is numbered {string.Join(", ", numbers)}");
+            Expect(expired.OfType<JobExpiredTemplatePaperData>().Single().jobType == name, "the expired report does not say shunting");
+            Expect(missing.OfType<MissingLicensesPageTemplatePaperData>().Single().jobType == name, "the missing-license report does not say shunting");
+            Line($"papers: {job.ID} {job.jobType} ({kind}) {start.ID.FullDisplayID} -> {end.ID.FullDisplayID}: {fronts.FirstOrDefault()?.jobType}, " +
+                 $"'{fronts.FirstOrDefault()?.jobDescription}'; booklet {string.Join(", ", kinds)}");
+            if (wrong.Count > 0)
+                Problem($"papers: {job.ID}: {string.Join("; ", wrong)}");
+        }
+
+        /// <summary>
+        /// A job to or from an interchange (InterchangePapers; owner, 2026-11-05: "The job bills
+        /// don't have the interchanges as a destination or source"): its overview's and booklet's
+        /// front pages name the interchange as the start or end, in its color; the booklet's haul
+        /// page names it as the destination; its couple or uncouple page gives the interchange's
+        /// code as the yard of its track.
+        /// </summary>
+        private void InterchangePapersCheck(Job job, Track start, Track end, bool writtenBefore = false)
+        {
+            interchangePapersChecked++;
+            var from = InterchangeYards.InterchangeOf(start);
+            var to = InterchangeYards.InterchangeOf(end);
+            var data = new Job_data(job);
+            var stationWrong = new List<string>();
+            // The interchange's own station's job (InterchangeStations): its ID, its chain's end, a haul.
+            if (from != null)
+            {
+                var code = InterchangeYards.CodeOf(from);
+                var holder = StationController.allStations.FirstOrDefault(s => s?.logicStation != null
+                    && (s.logicStation.availableJobs.Contains(job) || s.logicStation.takenJobs.Contains(job)))?.stationInfo.YardID;
+                // A job written before the interchanges were stations is the neighbor station's.
+                var neighbor = writtenBefore && holder == InterchangeYards.NeighborOf(from) && job.chainData.chainOriginYardId == holder;
+                if (!neighbor && (!job.ID.StartsWith(code + "-", StringComparison.Ordinal) || job.chainData.chainOriginYardId != code || holder != code))
+                    stationWrong.Add($"starts at the interchange but is {job.ID} of {holder ?? "no station"}, from {job.chainData.chainOriginYardId}");
+            }
+            if (to != null && job.chainData.chainDestinationYardId != InterchangeYards.CodeOf(to)
+                && !(writtenBefore && job.chainData.chainDestinationYardId == InterchangeYards.NeighborOf(to)))
+                stationWrong.Add($"ends at the interchange but goes to {job.chainData.chainDestinationYardId}");
+            if (StationMoves.KindOf(job.ID, job.jobType) != null && !writtenBefore)
+                stationWrong.Add($"is a station move ({StationMoves.KindOf(job.ID, job.jobType)}), not a haul");
+            var overview = BookletCreator_JobOverview.GetJobOverviewTemplateData(data);
+            var booklet = (List<TemplatePaperData>)HarmonyLib.AccessTools.Method(typeof(BookletCreator_Job), "GetBookletTemplateData", new[] { typeof(Job_data) }).Invoke(null, new object[] { data });
+            var wrong = new List<string>();
+            void Expect(bool ok, string what)
+            {
+                if (!ok)
+                    wrong.Add(what);
+            }
+            var fronts = overview.Concat(booklet).OfType<FrontPageTemplatePaperData>().ToList();
+            Expect(fronts.Count == 2, $"{fronts.Count} front pages, not 2");
+            foreach (var f in fronts)
+            {
+                if (from != null)
+                    Expect(f.startStationName == InterchangeYards.TitleOf(from) && f.startStationBgColor == InterchangeYards.ColorOf(from),
+                        $"a front page starts at '{f.startStationName}' ({f.startStationType})");
+                else
+                    Expect(f.startStationName == LocalizationAPI.L(data.chainOriginStationInfo.LocalizationKey), $"a front page starts at '{f.startStationName}', not the station");
+                if (to != null)
+                    Expect(f.endStationName == InterchangeYards.TitleOf(to) && f.endStationBgColor == InterchangeYards.ColorOf(to),
+                        $"a front page ends at '{f.endStationName}' ({f.endStationType})");
+                else
+                    Expect(f.endStationName == LocalizationAPI.L(data.chainDestinationStationInfo.LocalizationKey), $"a front page ends at '{f.endStationName}', not the station");
+            }
+            var tasks = booklet.OfType<TaskTemplatePaperData>().ToList();
+            var haul = tasks.FirstOrDefault(t => t.taskType == LocalizationAPI.L("job/task_type_haul"));
+            if (to != null)
+                Expect(haul != null && haul.stationName == InterchangeYards.TitleOf(to) && haul.stationColor == InterchangeYards.ColorOf(to),
+                    $"the haul page goes to '{haul?.stationName}'");
+            var couple = tasks.FirstOrDefault(t => t.taskType == LocalizationAPI.L("job/task_type_couple"));
+            var uncouple = tasks.LastOrDefault(t => t.taskType == LocalizationAPI.L("job/task_type_uncouple"));
+            if (from != null)
+                Expect(couple != null && couple.yardId == InterchangeYards.CodeOf(from) && couple.trackId == start.ID.TrackPartOnly && couple.yardColor == InterchangeYards.ColorOf(from),
+                    $"the couple page's track is {couple?.yardId} {couple?.trackId}");
+            else if (couple != null)
+                Expect(couple.yardId == start.ID.yardId, $"the couple page's yard is {couple.yardId}, not {start.ID.yardId}");
+            if (to != null)
+                Expect(uncouple != null && uncouple.yardId == InterchangeYards.CodeOf(to) && uncouple.trackId == end.ID.TrackPartOnly && uncouple.yardColor == InterchangeYards.ColorOf(to),
+                    $"the uncouple page's track is {uncouple?.yardId} {uncouple?.trackId}");
+            else if (uncouple != null)
+                Expect(uncouple.yardId == end.ID.yardId, $"the uncouple page's yard is {uncouple.yardId}, not {end.ID.yardId}");
+            var f0 = fronts.FirstOrDefault();
+            Line($"papers: {job.ID} {job.jobType} {start?.ID.FullDisplayID} -> {end?.ID.FullDisplayID}: from '{f0?.startStationName}' ({f0?.startStationType}) " +
+                 $"to '{f0?.endStationName}' ({f0?.endStationType}); couple {couple?.yardId} {couple?.trackId}, haul to '{haul?.stationName}', uncouple {uncouple?.yardId} {uncouple?.trackId}; " +
+                 $"stock {data.chainOriginStationInfo?.YardID} '{data.chainOriginStationInfo?.Type}' -> {data.chainDestinationStationInfo?.YardID} '{data.chainDestinationStationInfo?.Type}'");
+            if (wrong.Count > 0)
+                Problem($"papers: {job.ID}: {string.Join("; ", wrong)}");
+            if (stationWrong.Count > 0)
+                Problem($"stations: {job.ID}: {string.Join("; ", stationWrong)}");
         }
 
         /// <summary>The taken contract's cars after the work: none between legs without a job, unless at its industry (worked, or waiting for room).</summary>
@@ -781,7 +1043,8 @@ namespace Contracts.Mod.Runtime
             if (before.Count < setOut.Count || before.Text == null || !setOut.All(x => waiting.Contains(x.Car.ID)) || !before.Text.Contains("pickup"))
                 Problem("set-out moved: the desk does not list the cars set out for pickup");
             var (w0, car) = setOut[0];
-            var station = Economy.Station(InterchangeYards.StationOf(InterchangeYards.InterchangeOf(car.logicCar.FrontBogieTrack)));
+            // Into the yard of the station beside the interchange (the interchange's own has no storage).
+            var station = Economy.Station(InterchangeYards.NeighborOf(InterchangeYards.InterchangeOf(car.logicCar.FrontBogieTrack)));
             var length = SingletonBehaviour<CarSpawner>.Instance.GetTotalTrainCarsLength(new List<Car> { car.logicCar }, true);
             var track = station?.logicStation?.yard?.StorageTracks
                 .FirstOrDefault(t => t.GetCarsFullyOnTrack().Count == 0 && t.GetCarsPartiallyOnTrack().Count == 0 && organizer.GetFreeSpaceOnTrack(t) > length + 20.0);
@@ -1473,10 +1736,110 @@ namespace Contracts.Mod.Runtime
                 Problem("kiosk load: " + string.Join("; ", slow));
         }
 
+        /// <summary>
+        /// A player's saved career, loaded on this build (probe.txt "save"; run_spike.py --career):
+        /// nothing lost and nothing thrown (RF audit, 2026-11-06: the owner's Railroad 2 career,
+        /// last played with 23c6bc0, on the release with the interchanges as stations and their
+        /// tracks' new IDs). What loads: the contracts, every waybill's car, the jobs of contract
+        /// cars (their papers: shunting moves, and interchange jobs, written before or after),
+        /// the cars being worked on their industry's track; then the next 06:00 service, after
+        /// which no car being worked has gone idle and none is lost.
+        /// </summary>
+        private IEnumerator SaveRun()
+        {
+            log = new StreamWriter(Path.Combine(folder, "probe.log"), false);
+            Line($"probe (save) {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            for (var waited = 0f; !(ContractRuntime.Active && AStartGameData.carsAndJobsLoadingFinished) && waited < 240f; waited += 1f)
+                yield return new WaitForSeconds(1f);
+            yield return new WaitForSeconds(10f);
+            var rt = ContractRuntime.Instance;
+            if (rt == null || !ContractRuntime.Active)
+            {
+                Problem("the runtime never started");
+                yield return Finish();
+                yield break;
+            }
+            foreach (var n in rt.Notes)
+                Line("note: " + n);
+            var loadErrors = errors.Where(e => e.Contains("Skipping load") || e.Contains("Couldn't find corresponding") || e.StartsWith("Exception")).ToList();
+            foreach (var e in loadErrors)
+                Problem("save: loading: " + e);
+            HashSet<string> worked = null;
+            Try("save: what loaded", () => worked = SaveLoaded(rt, "loaded"));
+            yield return new WaitForSeconds(2f);
+            Try("save: the next service", () =>
+            {
+                Line($"save: service day {rt.LastServiceDay + 1}: {rt.Service(rt.LastServiceDay + 1)}");
+            });
+            yield return new WaitForSeconds(8f);
+            Try("save: after the service", () =>
+            {
+                SaveLoaded(rt, "after the service");
+                // A car with a stage but no job, not being worked and not waiting for room, goes back
+                // to idle at a service (moved off its industry track, say): none should here.
+                var idled = rt.LastService?.Idled ?? -1;
+                if (idled != 0)
+                    Problem($"save: the service sent {idled} car(s) back to idle");
+                var stillWorked = rt.State.Waybills.Count(w => worked != null && worked.Contains(w.Guid) && ContractRuntime.Worked(w));
+                Line($"save: of the {worked?.Count ?? 0} car(s) being worked before the service, {stillWorked} still are (the others finished)");
+            });
+            yield return Finish();
+        }
+
+        /// <summary>What the save holds now; the guids of the cars being worked on their industry's track.</summary>
+        private HashSet<string> SaveLoaded(ContractRuntime rt, string when)
+        {
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var st = rt.State;
+            Line($"save ({when}): {st.Contracts.Count} contract(s): {string.Join(", ", st.Contracts.Select(c => $"{c.Id} L{c.Level}"))}");
+            Line($"save ({when}): {st.Waybills.Count} waybill(s): {string.Join(", ", st.Waybills.GroupBy(w => w.Stage).Select(g => $"{g.Key} {g.Count()}"))}");
+            var missing = st.Waybills.Where(w => w.Stage != Stage.OffMap && registry.GetTrainCarByCarGuid(w.Guid) == null && !PersistentJobs.IsSuspended(w.Guid)).ToList();
+            if (missing.Count > 0)
+                Problem($"save ({when}): {missing.Count} car(s) not in the world: {string.Join(", ", missing.Take(12).Select(w => $"{w.Guid.Substring(0, 8)} {w.Stage} to {w.Next}"))}");
+            var cars = st.Waybills.Select(w => (W: w, Car: registry.GetTrainCarByCarGuid(w.Guid))).Where(x => x.Car != null).ToList();
+            var held = cars.Select(x => jobs.GetJobOfCar(x.Car.logicCar)).Where(j => j != null).Distinct().ToList();
+            Line($"save ({when}): {cars.Count} car(s) in the world, {cars.Count(x => InterchangeYards.IsInterchangeTrack(x.Car.logicCar.FrontBogieTrack))} on interchange tracks; {held.Count} job(s) of theirs");
+            foreach (var job in held)
+            {
+                var start = job.tasks.FirstOrDefault()?.GetTaskData().startTrack;
+                var end = ContractRuntime.JobDestination(job);
+                var holder = StationController.allStations.FirstOrDefault(s => s?.logicStation != null
+                    && (s.logicStation.availableJobs.Contains(job) || s.logicStation.takenJobs.Contains(job)))?.stationInfo.YardID;
+                Line($"save ({when}): job {job.ID} {job.jobType} {job.State} of {holder ?? "no station"}, {start?.ID.FullDisplayID ?? "?"} -> {end?.ID.FullDisplayID ?? "?"}");
+                if (start == null || end == null)
+                    Problem($"save ({when}): job {job.ID} has no start or end track");
+                else if (InterchangeYards.IsInterchangeTrack(start) || InterchangeYards.IsInterchangeTrack(end))
+                    InterchangePapersCheck(job, start, end, writtenBefore: true);
+                else if (start.ID.yardId == end.ID.yardId)
+                    Papers(job);
+            }
+            var worked = new HashSet<string>();
+            var off = new List<string>();
+            foreach (var (w, car) in cars.Where(x => ContractRuntime.Worked(x.W)))
+            {
+                if (rt.OnIndustryTrack(car, w))
+                    worked.Add(w.Guid);
+                else
+                    off.Add($"{car.ID} {w.Stage} at {w.Next} on {car.logicCar.FrontBogieTrack?.ID?.FullDisplayID ?? "no track"}");
+            }
+            Line($"save ({when}): {worked.Count} car(s) being worked on their industry's track" +
+                 $" ({string.Join(", ", cars.Where(x => worked.Contains(x.W.Guid)).GroupBy(x => x.Car.logicCar.FrontBogieTrack?.ID?.FullDisplayID).Select(g => $"{g.Key} {g.Count()}"))})");
+            if (off.Count > 0)
+                Problem($"save ({when}): {off.Count} car(s) being worked off their industry's track: {string.Join("; ", off.Take(12))}");
+            var jobless = rt.Jobless();
+            Line($"save ({when}): {jobless.Count} car(s) without a job: {string.Join(", ", jobless.GroupBy(c => c.Reason).Select(g => $"{g.Key} {g.Count()}"))}");
+            return worked;
+        }
+
         private IEnumerator Finish()
         {
             foreach (var e in errors.Distinct().Take(80))
                 Line("log: " + e);
+            // A job ID registered twice, or let go unregistered (StationMoves forces its IDs).
+            var ids = errors.Count(e => e.Contains("jobId: "));
+            if (ids > 0)
+                Problem($"{ids} job ID error(s) logged");
             Line($"PROBE DONE: {problems} problem(s)");
             log?.Close();
             if (quitAfter)

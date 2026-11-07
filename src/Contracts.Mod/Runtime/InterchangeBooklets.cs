@@ -10,9 +10,11 @@ namespace Contracts.Mod.Runtime
 {
     /// <summary>
     /// Booklets at the interchange offices (design D10, spike S7; owner, 2026-11-02: "I don't see
-    /// any waybills for these cars at the office"). A job whose cars start on an interchange's
-    /// tracks belongs to that interchange's station (MF for MF West, IME for IME West), whose
-    /// office is far off. Its overview booklet goes on the interchange office's table instead:
+    /// any waybills for these cars at the office"). An interchange is a station of its own
+    /// (InterchangeStations), and lays out its jobs' booklets on its office's table itself. A job
+    /// written before, or with Interchange Yards 0.1.4 or before, whose cars start on an
+    /// interchange's tracks belongs to the station beside it (MF for MF West, IME for IME West),
+    /// whose office is far off. Its overview booklet goes on the interchange office's table instead:
     ///
     /// - laid out as the stock station does it (StationController.Update), one a frame, once a
     ///   player is within 150 m of the interchange office, and entered in that station's own
@@ -129,7 +131,7 @@ namespace Contracts.Mod.Runtime
                 var table = Table(interchange);
                 if (table == null || !AnyPlayerNear(table.transform.position))
                     continue;
-                var station = Economy.Station(InterchangeYards.StationOf(interchange));
+                var station = Economy.Station(InterchangeYards.NeighborOf(interchange));
                 if (station?.logicStation == null)
                     continue;
                 var processed = Traverse.Create(station).Field("processedNewJobs").GetValue<HashSet<Job>>();
@@ -202,7 +204,10 @@ namespace Contracts.Mod.Runtime
                     if (laying || !ContractRuntime.Active)
                         return;
                     var interchange = InterchangeOf(job);
-                    var table = interchange == null ? null : Table(interchange);
+                    // The interchange's own station lays its jobs' booklets on this table itself.
+                    if (interchange == null || job.chainData?.chainOriginYardId == InterchangeYards.CodeOf(interchange))
+                        return;
+                    var table = Table(interchange);
                     if (table == null)
                         return;
                     (position, rotation) = table.GetRandomPointWithRotationOnPlane();

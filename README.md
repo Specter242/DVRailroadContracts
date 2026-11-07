@@ -6,7 +6,7 @@ traffic with stock jobs. Cars come and go only through the interchange yards of
 [Interchange Yards](https://github.com/Specter242/DVInterchangeYards).
 
 - **Download and read about it** on Nexus Mods: https://www.nexusmods.com/derailvalley/mods/1816
-- **Requires** Interchange Yards and Persistent Jobs (continued); Passenger Jobs for passenger
+- **Requires** Interchange Yards 0.1.5 or later and Persistent Jobs (continued); Passenger Jobs for passenger
   contracts.
 - **Updates:** Unity Mod Manager reads `repository.json` here and offers each new version.
 

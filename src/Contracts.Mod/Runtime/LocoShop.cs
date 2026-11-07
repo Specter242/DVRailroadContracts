@@ -325,9 +325,11 @@ namespace Contracts.Mod.Runtime
                 }
             }
             var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            var spots = Core.Industries.IndustrySpots.TracksAt(station.stationInfo.YardID);
             foreach (var track in station.logicStation?.yard?.StorageTracks ?? new List<Track>())
             {
-                if (organizer == null || organizer.GetFreeSpaceOnTrack(track) < length + 10.0 || track.GetCarsFullyOnTrack().Count > 0)
+                // Not an industry's spot track (design, "Industry spots").
+                if (organizer == null || organizer.GetFreeSpaceOnTrack(track) < length + 10.0 || track.GetCarsFullyOnTrack().Count > 0 || spots.Contains(track.ID.TrackPartOnly))
                     continue;
                 var rail = RailTrackRegistry.LogicToRailTrack.TryGetValue(track, out var r) ? r : null;
                 var spawned = rail == null ? null : Spawn(list, Middle(rail));
@@ -414,15 +416,23 @@ namespace Contracts.Mod.Runtime
     }
 
     /// <summary>
-    /// The interchanges' tracks, found by the job IDs the interchange mod gives them (type X,
-    /// under the station whose sub-yard the interchange is: MF-WI-01-X). An interchange is named
-    /// as its office is: "MF West" at MF, "IME West" at IME.
+    /// The interchanges' tracks, found by the job IDs the interchange mod gives them: type X, in
+    /// the interchange's own yard (WI-A-01-X, NEI-A-01-X), a station of its own
+    /// (InterchangeStations); up to Interchange Yards 0.1.4, in the yard of the station beside it
+    /// (MF-WI-01-X, IME-NEI-01-X). An interchange is named as its office is, "MF West" and
+    /// "IME West": the contract state knows it by that name.
     /// </summary>
     internal static class InterchangeYards
     {
         public const string TrackType = "X";
 
-        public static string NameOf(string stationYard) => stationYard + " West";
+        /// <summary>The interchange whose tracks are in a yard: its own (WI, NEI), or the station's beside it (MF, IME).</summary>
+        public static string NameOf(string yard) =>
+            yard == "WI" ? "MF West" : yard == "NEI" ? "IME West" : yard + " West";
+
+        /// <summary>The stock station beside an interchange, whose sub-yard it was: MF beside MF West, IME beside IME West.</summary>
+        public static string NeighborOf(string interchange) =>
+            interchange != null && interchange.EndsWith(" West", StringComparison.Ordinal) ? interchange.Substring(0, interchange.Length - 5) : null;
 
         /// <summary>
         /// An interchange's name as the player reads it, its code on the maps and in the books
@@ -431,16 +441,37 @@ namespace Contracts.Mod.Runtime
         public static string CodeOf(string interchange) =>
             interchange == "MF West" ? "WI" : interchange == "IME West" ? "NEI" : interchange;
 
-        public static string StationOf(string interchange) =>
-            interchange != null && interchange.EndsWith(" West", StringComparison.Ordinal) ? interchange.Substring(0, interchange.Length - 5) : null;
+        /// <summary>An interchange's full name on the maps and in the books (the interchange mod's): West Interchange, Northeast Interchange.</summary>
+        public static string TitleOf(string interchange) =>
+            interchange == "MF West" ? "West Interchange" : interchange == "IME West" ? "Northeast Interchange" : interchange;
 
-        /// <summary>Every interchange track, by interchange name.</summary>
+        /// <summary>An interchange's color on the maps and in the books (the interchange mod's): teal for West Interchange, light teal for Northeast.</summary>
+        public static Color ColorOf(string interchange) =>
+            interchange == "IME West" ? new Color32(78, 164, 164, 255) : new Color32(52, 128, 132, 255);
+
+        /// <summary>
+        /// The station an interchange's jobs start and end at: the yard its tracks are in (its own,
+        /// WI or NEI; with Interchange Yards 0.1.4 or before, the station beside it).
+        /// </summary>
+        public static string StationOf(string interchange)
+        {
+            var tracks = Tracks(interchange);
+            return tracks.Count > 0 ? tracks[0].ID.yardId : NeighborOf(interchange);
+        }
+
+        private static YardTracksOrganizer seenOrganizer;
+        private static int seenCount = -1;
+        private static Dictionary<string, List<Track>> seen = new Dictionary<string, List<Track>>();
+
+        /// <summary>Every interchange track, by interchange name (read again when the yard organizer's tracks change).</summary>
         public static Dictionary<string, List<Track>> All()
         {
-            var result = new Dictionary<string, List<Track>>();
             var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
             if (organizer == null)
-                return result;
+                return new Dictionary<string, List<Track>>();
+            if (organizer == seenOrganizer && organizer.yardTrackIdToTrack.Count == seenCount)
+                return Copy(seen);
+            var result = new Dictionary<string, List<Track>>();
             foreach (var kv in organizer.yardTrackIdToTrack.OrderBy(k => k.Key, StringComparer.Ordinal))
             {
                 var parts = kv.Key.Split('-');
@@ -451,8 +482,14 @@ namespace Contracts.Mod.Runtime
                     result[name] = list = new List<Track>();
                 list.Add(kv.Value);
             }
-            return result;
+            seenOrganizer = organizer;
+            seenCount = organizer.yardTrackIdToTrack.Count;
+            seen = result;
+            return Copy(result);
         }
+
+        private static Dictionary<string, List<Track>> Copy(Dictionary<string, List<Track>> all) =>
+            all.ToDictionary(kv => kv.Key, kv => new List<Track>(kv.Value));
 
         public static List<Track> Tracks(string interchange) =>
             All().TryGetValue(interchange ?? "", out var list) ? list : new List<Track>();
@@ -460,5 +497,8 @@ namespace Contracts.Mod.Runtime
         public static bool IsInterchangeTrack(Track t) => t != null && t.ID != null && t.ID.FullID.EndsWith("-" + TrackType, StringComparison.Ordinal);
 
         public static string InterchangeOf(Track t) => IsInterchangeTrack(t) ? NameOf(t.ID.yardId) : null;
+
+        public static string InterchangeOf(TrackID id) =>
+            id?.FullID != null && id.FullID.EndsWith("-" + TrackType, StringComparison.Ordinal) ? NameOf(id.yardId) : null;
     }
 }

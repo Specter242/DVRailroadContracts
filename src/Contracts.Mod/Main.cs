@@ -42,11 +42,14 @@ namespace Contracts.Mod
                     WorldStreamingInit.LoadingFinished += Runtime.ContractRuntime.OnWorldLoaded;
                     Runtime.CareerRules.GuardPassengerJobs(harmony);
                     Runtime.Passengers.Install(harmony);
+                    Runtime.InterchangeStations.Install();
+                    Runtime.InterchangeStations.GuardPersistentJobs(harmony);
                     Runtime.InterchangeBooklets.Install();
                     Runtime.InterchangeBooklets.GuardJobRange(harmony);
                 }
 #if DEVTOOLS
                 Runtime.Probe.Install(modEntry.Path);
+                Runtime.Survey.Install(modEntry.Path);
 #endif
                 return true;
             }

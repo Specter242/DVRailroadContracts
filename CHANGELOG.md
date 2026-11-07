@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8 (2026-11-06)
+
+- The short moves within a station, spotting cars at an industry and pulling its empties into storage, are shunting jobs: their papers say Shunting, and their IDs have SL or SU.
+- Industries work each cargo where it's handled: at the Steel Mill, steel under the portal crane and deliveries at the factory dock, and likewise at the other industries' cranes, docks, silos, racks and log piles. Cars already being loaded or unloaded finish where they are.
+- The interchanges are stations of their own, West Interchange (WI) and Northeast Interchange (NEI), with their own jobs, papers and booklets at their offices. Needs Interchange Yards 0.1.5.
+
 ## 0.1.7 (2026-11-06)
 
 - Multiplayer: the job booklets at the interchange offices come out for any player there, not only the host.
