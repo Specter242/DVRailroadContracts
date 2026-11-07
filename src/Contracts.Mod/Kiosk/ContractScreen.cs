@@ -64,6 +64,21 @@ namespace Contracts.Mod.Kiosk
             var desk = KioskMenu.Desk;
             if (contract == null || desk == null)
                 return;
+            if (contract.Id == Runtime.RuntimeDesk.SellId)
+            {
+                // Each vehicle the player bought, with the offer for it; the sale's result goes on the
+                // info screen. One that can't be sold now says why there.
+                foreach (var unit in Runtime.VehicleSales.Owned())
+                {
+                    var u = unit;
+                    choices.Add(u.Blocker != null
+                        ? new Choice { Label = u.Label, Value = $"${u.Offer:N0}", Explain = $"{u.Label} can't be sold now.\n\n{u.Blocker}" }
+                        : new Choice { Label = u.Label, Value = $"${u.Offer:N0}", Ask = Runtime.VehicleSales.Ask(u), Act = () => Runtime.VehicleSales.Sell(u) });
+                }
+                if (choices.Count == 0)
+                    choices.Add(new Choice { Label = "Nothing to sell", Value = "", Ask = "Locomotives and coaches you buy here can be sold back." });
+                return;
+            }
             if (Runtime.RuntimeDesk.ShopOf(contract.Id) is Runtime.LocoShop.Kind kind)
             {
                 // A purchase's result, or why it can't be made, goes on the kiosk's info screen in
@@ -163,6 +178,12 @@ namespace Contracts.Mod.Kiosk
             SetIndexOfFirstDisplayWithinBounds();
             Scroll(IndexOfFirstDisplayedEntry, selector.Current);
             // The info line holds about 37 characters, so the player's level and performance go on the title.
+            if (contract != null && contract.Id == Runtime.RuntimeDesk.SellId)
+            {
+                lines.Title.text = "Sell vehicles";
+                lines.Info.text = $"Cash ${Runtime.LocoShop.Money:N0}";
+                return;
+            }
             if (contract != null && Runtime.RuntimeDesk.ShopOf(contract.Id) is Runtime.LocoShop.Kind shop)
             {
                 lines.Title.text = shop == Runtime.LocoShop.Kind.Coaches ? "Coaches" : "Locomotives";

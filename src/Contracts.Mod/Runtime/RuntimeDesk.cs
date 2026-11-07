@@ -23,9 +23,11 @@ namespace Contracts.Mod.Runtime
         public const string CoachShopId = "#coaches";
         /// <summary>The list's "Cars without jobs" row (owner, 2026-11-03: cars on an interchange with no job number).</summary>
         public const string JoblessId = "#jobless";
+        /// <summary>The Contracts list's row for selling bought vehicles back (VehicleSales).</summary>
+        public const string SellId = "#sell";
 
         /// <summary>Whether a list entry is a contract (not a shop or the jobless cars' row).</summary>
-        public static bool IsContract(string id) => ShopOf(id) == null && id != JoblessId;
+        public static bool IsContract(string id) => ShopOf(id) == null && id != JoblessId && id != SellId;
 
         /// <summary>The shop a menu entry opens, or null for a contract.</summary>
         public static LocoShop.Kind? ShopOf(string id) =>

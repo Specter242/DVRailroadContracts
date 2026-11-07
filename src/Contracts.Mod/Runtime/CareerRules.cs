@@ -64,6 +64,9 @@ namespace Contracts.Mod.Runtime
             if (station == null || de2 == null)
                 return false;
             var spawned = LocoShop.Deliver(new[] { de2 }, station, out var where);
+            // It came free: sold back, it fetches nothing (VehicleSales).
+            if (spawned != null)
+                VehicleSales.Record(spawned, 0.0, false);
             notes.Add(spawned == null
                 ? $"starter: no free locomotive track at {station.stationInfo.YardID} for the DE2"
                 : $"starter: DE2 {spawned[0].ID} delivered at {station.stationInfo.YardID}, {where}");

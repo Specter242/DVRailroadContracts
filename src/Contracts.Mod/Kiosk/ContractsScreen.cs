@@ -49,6 +49,8 @@ namespace Contracts.Mod.Kiosk
             // 2026-11-02: "where do we buy coaches?"), with the spike's stand-in desk too.
             entries.Add(new ContractView { Id = Runtime.RuntimeDesk.ShopId, Short = "Buy locomotives", IsOffer = false });
             entries.Add(new ContractView { Id = Runtime.RuntimeDesk.CoachShopId, Short = "Buy coaches", IsOffer = false });
+            // Bought vehicles sold back (owner, 2026-11-07: "You should be re-railing them or selling them").
+            entries.Add(new ContractView { Id = Runtime.RuntimeDesk.SellId, Short = "Sell vehicles", IsOffer = false });
             // Contract cars with no job now (set out for the pickup, idle...): a row that says which and why.
             var jobless = desk.Jobless();
             if (jobless.Count > 0)
@@ -135,7 +137,7 @@ namespace Contracts.Mod.Kiosk
 
         internal static string Value(ContractView c)
         {
-            if (Runtime.RuntimeDesk.ShopOf(c.Id) != null)
+            if (Runtime.RuntimeDesk.ShopOf(c.Id) != null || c.Id == Runtime.RuntimeDesk.SellId)
                 return "shop";
             if (c.Id == Runtime.RuntimeDesk.JoblessId)
                 return $"{c.OpenWaybills}";

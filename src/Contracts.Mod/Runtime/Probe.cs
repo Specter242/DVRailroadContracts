@@ -113,6 +113,7 @@ namespace Contracts.Mod.Runtime
             yield return null;
             Try("shop", ShopCheck);
             yield return null;
+            yield return SaleCheck();
             string taken = null;
             Try("contract and service", () => taken = ServiceCheck(rt));
             yield return new WaitForSeconds(3f);
@@ -471,6 +472,175 @@ namespace Contracts.Mod.Runtime
                 // Whatever is bought arrives at an interchange, as every car does (owner, 2026-11-03).
                 if (added.Any(c => !InterchangeYards.IsInterchangeTrack(c.logicCar?.FrontBogieTrack)))
                     Problem($"{item.Name} was delivered off the interchanges: {string.Join(", ", added.Select(c => c.logicCar?.FrontBogieTrack?.ID?.FullDisplayID))}");
+            }
+        }
+
+        /// <summary>
+        /// Selling bought vehicles back (VehicleSales; owner, 2026-11-07), and purchases that never
+        /// take a cleared vehicle's number. First the game's own carry-over, with fresh purchases
+        /// off: a DE2 bought, cleared as the comms radio's Clear does it, and a DE2 bought again.
+        /// Then with them on: a DE2 bought after another was cleared has a number of its own and
+        /// the cleared one's bill is gone. Then sales: a DE2 sold pays its offer (half what was
+        /// paid, less its repairs and refills) and leaves no car, bill, kept state or record; a
+        /// derailed one sells where it stands; a train of two coaches sells together; a DE2
+        /// bought after a sale is new; and the kiosk's Sell vehicles rows are the offers.
+        /// </summary>
+        private IEnumerator SaleCheck()
+        {
+            var inventory = SingletonBehaviour<Inventory>.Instance;
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var de2 = LocoShop.Catalogue(LocoShop.Kind.Locomotives).FirstOrDefault(i => i.Name == "DE2");
+            var pair = LocoShop.Catalogue(LocoShop.Kind.Coaches).FirstOrDefault(i => i.Cars.Count == 2);
+            if (inventory == null || spawner == null || de2 == null || pair == null)
+            {
+                Problem("sale: no shop");
+                yield break;
+            }
+            var livery = de2.Cars[0];
+            Line("sale: the kiosk lists: " + string.Join("; ", VehicleSales.Owned().Select(u => $"{u.Label} ${u.Offer:N0} (paid ${u.Paid:N0}{(u.PaidRecorded ? "" : " today")}, owed ${u.Owed:N0}{(u.Blocker != null ? ", " + u.Blocker : "")})")));
+            List<TrainCar> Buy(LocoShop.Item item)
+            {
+                inventory.AddMoney(item.Price + 1000f);
+                var before = new HashSet<TrainCar>(spawner.AllCars);
+                var message = LocoShop.Buy(item, null);
+                var added = spawner.AllCars.Where(c => !before.Contains(c)).ToList();
+                if (added.Count != item.Cars.Count)
+                    Problem($"sale: buying {item.Name} delivered {added.Count} car(s): {message.Replace("\n", " ")}");
+                return added;
+            }
+            void Clear(TrainCar car)
+            {
+                spawner.DeleteCar(car);
+                SingletonBehaviour<UnusedTrainCarDeleter>.Instance.ClearInvalidCarReferencesAfterManualDelete();
+                if (car != null)
+                    car.gameObject.SetActive(false);
+            }
+            bool Gone(string guid) => registry.GetTrainCarByCarGuid(guid) == null;
+            bool Recorded(string guid) => ContractRuntime.Instance?.State.Bought.Any(b => b.Guid == guid) ?? false;
+            string Sold(TrainCar car, string what)
+            {
+                var unit = VehicleSales.Owned().FirstOrDefault(u => u.Cars.Contains(car));
+                if (unit == null)
+                {
+                    Problem($"sale: {what} {car.ID} is not on the kiosk's list");
+                    return null;
+                }
+                var money = inventory.PlayerMoney;
+                var offer = unit.Offer;
+                var expected = Contracts.Core.Shop.VehicleSale.Offer(unit.Paid, unit.Owed);
+                var message = VehicleSales.Sell(unit);
+                var paid = inventory.PlayerMoney - money;
+                Line($"sale: {what} {unit.Label} ({string.Join(", ", unit.Cars.Select(c => c.ID))}): paid ${unit.Paid:N0}{(unit.PaidRecorded ? "" : " today")}, owed ${unit.Owed:N0}, " +
+                     $"offer ${offer:N0}; '{message.Replace("\n", " ")}'; money +{paid:N0}");
+                if (Math.Abs(offer - expected) > 0.5 || Math.Abs(paid - offer) > 1.0)
+                    Problem($"sale: {what} paid ${paid:N0}, offered ${offer:N0}, the rule says ${expected:N0}");
+                return unit.Label;
+            }
+
+            // 1. The game's own carry-over: a cleared owned vehicle's number goes to the next of its model.
+            VehicleSales.FreshPurchases = false;
+            var a = Buy(de2).FirstOrDefault();
+            if (a == null)
+                yield break;
+            var aId = a.ID;
+            Clear(a);
+            yield return new WaitForSeconds(1f);
+            var keptA = VehicleSales.KeptId(livery);
+            var billA = VehicleSales.HasBill(aId);
+            var b = Buy(de2).FirstOrDefault();
+            if (b == null)
+                yield break;
+            var carried = b.ID == aId;
+            Line($"sale: the game's own carry-over: DE2 {aId} cleared (kept state {keptA ?? "none"}, bill {billA}); the next DE2 bought is {b.ID}, " +
+                 $"{(carried ? "the cleared one's number" : "a number of its own")}; the cleared one's bill now {VehicleSales.HasBill(aId)}");
+            if (!carried)
+                Line("sale: the carry-over did not happen here; fresh purchases change nothing");
+            var bId = b.ID;
+            Clear(b);
+            yield return new WaitForSeconds(1f);
+
+            // 2. Fresh purchases: a new DE2 gets a number of its own, and the cleared one's bill goes.
+            VehicleSales.FreshPurchases = true;
+            var keptB = VehicleSales.KeptId(livery);
+            var c = Buy(de2).FirstOrDefault();
+            if (c == null)
+                yield break;
+            Line($"sale: fresh: DE2 {bId} cleared (kept state {keptB ?? "none"}, bill {VehicleSales.HasBill(bId)}); the next DE2 is {c.ID}; kept state now {VehicleSales.KeptId(livery) ?? "none"}, " +
+                 $"the cleared one's bill {VehicleSales.HasBill(bId)}");
+            if (c.ID == bId || VehicleSales.KeptId(livery) != null || VehicleSales.HasBill(bId))
+                Problem($"sale: a DE2 bought after one was cleared is {c.ID} (cleared {bId}), or the cleared one's state or bill stayed");
+
+            // 3. A DE2 in good order sold: its offer paid, and nothing left behind.
+            var cId = c.ID;
+            var cGuid = c.logicCar.carGuid;
+            yield return new WaitForSeconds(1f);
+            Sold(c, "DE2");
+            yield return new WaitForSeconds(1f);
+            if (!Gone(cGuid) || VehicleSales.HasBill(cId) || VehicleSales.KeptId(livery) == cId || Recorded(cGuid))
+                Problem($"sale: DE2 {cId} sold left something: car {!Gone(cGuid)}, bill {VehicleSales.HasBill(cId)}, kept state {VehicleSales.KeptId(livery) == cId}, record {Recorded(cGuid)}");
+
+            // 4. A wreck sells where it stands.
+            var e = Buy(de2).FirstOrDefault();
+            if (e == null)
+                yield break;
+            var eGuid = e.logicCar.carGuid;
+            e.Derail();
+            yield return new WaitForSeconds(2f);
+            Line($"sale: DE2 {e.ID} derailed: {e.derailed}");
+            Sold(e, "derailed DE2");
+            yield return new WaitForSeconds(1f);
+            if (!Gone(eGuid))
+                Problem("sale: the derailed DE2 is still there");
+
+            // 5. A train of two coaches sells together.
+            var coaches = Buy(pair);
+            if (coaches.Count != 2)
+                yield break;
+            yield return new WaitForSeconds(1f);
+            var unit2 = VehicleSales.Owned().FirstOrDefault(u => u.Cars.Contains(coaches[0]));
+            if (unit2 == null || unit2.Cars.Count != 2 || !unit2.Cars.Contains(coaches[1]) || unit2.Blocker != null)
+                Problem($"sale: the two coaches bought together are not one sale: {unit2?.Cars.Count ?? 0} car(s), {unit2?.Blocker ?? "no blocker"}");
+            var guids = coaches.Select(x => x.logicCar.carGuid).ToList();
+            Sold(coaches[0], "coaches");
+            yield return new WaitForSeconds(1f);
+            if (!guids.All(Gone))
+                Problem("sale: a coach of the pair is still there");
+
+            // 6. A DE2 bought after a sale is new.
+            var f = Buy(de2).FirstOrDefault();
+            if (f != null)
+            {
+                Line($"sale: the next DE2 bought is {f.ID} (sold {cId})");
+                if (f.ID == cId)
+                    Problem("sale: a DE2 bought after a sale took the sold one's number");
+                // The kiosk's rows are the offers.
+                var main = Resources.FindObjectsOfTypeAll<CareerManagerMainScreen>().FirstOrDefault(m => m.gameObject.scene.IsValid() && KioskMenu.TryGet(m, out _));
+                if (main != null && KioskMenu.TryGet(main, out var x))
+                {
+                    var kiosk = main.screenSwitcher;
+                    kiosk.SetActiveDisplay(main);
+                    kiosk.SetActiveDisplay(x.List);
+                    var row = x.List.Entries.FirstOrDefault(r => r.Id == RuntimeDesk.SellId);
+                    if (row == null)
+                        Problem("sale: no Sell vehicles row on the kiosk");
+                    else
+                    {
+                        x.Detail.Show(row);
+                        kiosk.SetActiveDisplay(x.Detail);
+                        yield return null;
+                        var shown = x.Detail.Shown().ToList();
+                        Line($"sale: the kiosk's Sell vehicles: {string.Join("; ", shown)}");
+                        var mine = VehicleSales.Owned().FirstOrDefault(u => u.Cars.Contains(f));
+                        if (mine == null || !shown.Any(s => s.StartsWith(mine.Label) && s.Contains($"${mine.Offer:N0}")))
+                            Problem("sale: the kiosk does not offer the DE2 just bought at its price");
+                        kiosk.SetActiveDisplay(x.List);
+                        kiosk.SetActiveDisplay(main);
+                    }
+                }
+                else
+                    Problem("sale: no kiosk with Contracts");
+                Sold(f, "DE2");
             }
         }
 

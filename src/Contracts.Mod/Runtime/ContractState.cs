@@ -71,6 +71,18 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("ready")] public double? Ready;       // when its industry is done with it, once its work has begun
     }
 
+    /// <summary>
+    /// A vehicle the player got at the kiosk (or a new career's starter), for its sale
+    /// (VehicleSales): its share of what was paid, and the purchase it came with (a
+    /// locomotive's tender, a train of coaches), sold together.
+    /// </summary>
+    internal sealed class Purchase
+    {
+        [JsonProperty("guid")] public string Guid;
+        [JsonProperty("set")] public string Set;       // the guid of the purchase's first car
+        [JsonProperty("price")] public double Price;   // this car's share of what was paid
+    }
+
     /// <summary>The runtime's saved state, under its own save key (design, "Saves").</summary>
     internal sealed class ContractState
     {
@@ -85,6 +97,7 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("contracts")] public List<HeldContract> Contracts = new List<HeldContract>();
         [JsonProperty("waybills")] public List<Waybill> Waybills = new List<Waybill>();
         [JsonProperty("owed")] public double Owed;              // penalties not yet taken from the wallet (ContractPay)
+        [JsonProperty("bought")] public List<Purchase> Bought = new List<Purchase>();   // vehicles bought at the kiosk, from 0.1.9
 
         [JsonIgnore] private Dictionary<string, Waybill> byGuid;
 

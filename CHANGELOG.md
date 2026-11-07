@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.9 (2026-11-07)
+
+- Sell the vehicles you bought back at the kiosk's Sell vehicles: half what you paid, less what its repairs and refills cost, never less than a tenth. A wreck sells where it stands.
+- A vehicle you buy is always new: it no longer takes the number and paint of one you cleared.
+
 ## 0.1.8 (2026-11-06)
 
 - The short moves within a station, spotting cars at an industry and pulling its empties into storage, are shunting jobs: their papers say Shunting, and their IDs have SL or SU.

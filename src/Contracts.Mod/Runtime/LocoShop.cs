@@ -204,6 +204,10 @@ namespace Contracts.Mod.Runtime
 
         private static readonly Dictionary<TrainCarLivery, bool> fireboxes = new Dictionary<TrainCarLivery, bool>();
 
+        /// <summary>Whether a livery is one of the game's own coaches, which the coach shop sells.</summary>
+        internal static bool IsStockCoach(TrainCarLivery livery) =>
+            livery != null && StockCoaches.Any(c => Globals.G.Types.TrainCarType_to_v2.TryGetValue(c.Type, out var l) && l == livery);
+
         /// <summary>Whether a livery is a coach: it carries passengers and is no locomotive, tender or caboose.</summary>
         internal static bool IsCoach(TrainCarLivery livery) => livery != null && Sells(Kind.Coaches, livery);
 
@@ -239,7 +243,7 @@ namespace Contracts.Mod.Runtime
         });
 
         /// <summary>The livery's name in the game's language, else its type's, else its id; short enough for a kiosk row.</summary>
-        private static string NameOf(TrainCarLivery livery)
+        internal static string NameOf(TrainCarLivery livery)
         {
             var name = livery.id;
             foreach (var key in new[] { livery.localizationKey, livery.parentType?.localizationKey })
@@ -298,6 +302,7 @@ namespace Contracts.Mod.Runtime
             if (spawned == null)
                 return $"No free interchange track for {item.Name}.\n\nClear one at WI or NEI and try again. Nothing was paid.";
             inventory.RemoveMoney(item.Price);
+            VehicleSales.Record(spawned, item.Price, item.Kind == Kind.Coaches);
             LicenseRules.LicenseOwned(spawned, null);
             Main.Log($"shop: sold {item.Name} for ${item.Price:N0}: {string.Join(", ", spawned.Select(c => c.ID))} on {where}");
             return $"{item.Name} delivered on {where}: {string.Join(", ", spawned.Select(c => c.ID))}.\n\n${item.Price:N0} paid. You have ${inventory.PlayerMoney:N0} left.";
@@ -397,9 +402,13 @@ namespace Contracts.Mod.Runtime
             return null;
         }
 
-        private static List<TrainCar> Spawn(List<TrainCarLivery> cars, Vector3 at) =>
-            SingletonBehaviour<CarSpawner>.Instance?.SpawnCarTypesOnClosestTrack(cars, at, null, preventAutoCoupleOnLastCars: true,
+        /// <summary>The player's own vehicles spawned, fresh: never with a cleared vehicle's number or paint (VehicleSales.Freshen).</summary>
+        private static List<TrainCar> Spawn(List<TrainCarLivery> cars, Vector3 at)
+        {
+            VehicleSales.Freshen(cars);
+            return SingletonBehaviour<CarSpawner>.Instance?.SpawnCarTypesOnClosestTrack(cars, at, null, preventAutoCoupleOnLastCars: true,
                 applyHandbrakeOnLastCars: true, startSpan: 0.0, flipTrainConsist: false, playerSpawnedCars: true, uniqueSpawnedCars: true);
+        }
 
         private static float Length(List<TrainCarLivery> cars)
         {
