@@ -9,10 +9,14 @@ namespace Contracts.Mod.Kiosk
     /// One contract: its industry and state on the title and info lines, and what can be done
     /// with it as rows. An offer can be taken at any level (the value column shows each
     /// level's carloads a day: out, in and waste for an industry), once the player holds the
-    /// licenses it needs; until then the info line says which. The player's own can be raised, lowered, kept at its level
-    /// (undoing a change asked for today) or ended, and its last row shows the quick-delivery
-    /// bonus. Lowering and ending show their penalty. Each action asks first, on the kiosk's
-    /// own confirm screen; level changes and new contracts take effect at midnight, an ending now.
+    /// licenses it needs; until then the info line says which. For the player's own industry or
+    /// bridge contract, the info line counts its cars still to move ("To move: 3 out / 5 in / 1
+    /// waste"), its first row opens its Cars page (each car by line and what it needs next, with
+    /// its job), and the next shows its cars a day (Ace, Discord, 2026-11-08). Then it can be
+    /// raised, lowered, kept at its level (undoing a change asked for today) or ended, and its last
+    /// row shows the quick-delivery bonus. Lowering and ending show their penalty. Each action
+    /// asks first, on the kiosk's own confirm screen; level changes and new contracts take effect
+    /// at midnight, an ending now.
     /// </summary>
     internal sealed class ContractScreen : ScrollableDisplayScreen
     {
@@ -24,6 +28,8 @@ namespace Contracts.Mod.Kiosk
             // kiosk's info screen; and a reason a row can't be done, too long for the info line.
             public Func<string> Act;
             public string Explain;
+            // A long text to read, a page at a time on the info screen (the contract's cars), read when opened.
+            public Func<string> Page;
         }
 
         private DisplayScreenSwitcher kiosk;
@@ -32,6 +38,7 @@ namespace Contracts.Mod.Kiosk
         private CareerManagerInfoScreen info;
         private KioskLines lines;
         private ContractView contract;
+        private ContractCarsView cars;
         private readonly List<Choice> choices = new List<Choice>();
 
         public ContractView Contract => contract;
@@ -61,6 +68,7 @@ namespace Contracts.Mod.Kiosk
         private void Build()
         {
             choices.Clear();
+            cars = null;
             var desk = KioskMenu.Desk;
             if (contract == null || desk == null)
                 return;
@@ -121,6 +129,24 @@ namespace Contracts.Mod.Kiosk
                 }
                 return;
             }
+            // Its cars now, a page of them by line and what each needs next, and its cars a day at its
+            // level (Ace, Discord, 2026-11-08: "an easy way to keep track of cars in/out/waste").
+            cars = desk.Cars(contract);
+            if (cars != null)
+            {
+                var c = contract;
+                choices.Add(new Choice
+                {
+                    Label = "Cars", Value = $"{cars.ToMove} to move",
+                    Page = () => desk.Cars(c)?.Page ?? (c.Level < 1 ? "Its cars come from 06:00 the morning after it starts." : "None of its cars are on the map."),
+                });
+            }
+            if (!Runtime.RuntimeDesk.IsPassenger(contract.Id))
+                choices.Add(new Choice
+                {
+                    Label = "Cars a day", Value = desk.Volume(contract, contract.Level >= 1 ? contract.Level : contract.RequestedLevel),
+                    Ask = desk.Legend(contract),
+                });
             var asked = contract.RequestedLevel;
             // A raise is one level from the current one, with the standing for it (owner,
             // 2026-11-02: "gate upgrading contracts to performance, consistent performance").
@@ -190,14 +216,15 @@ namespace Contracts.Mod.Kiosk
                 lines.Info.text = $"Cash ${Runtime.LocoShop.Money:N0}";
                 return;
             }
-            lines.Title.text = contract == null ? "" : contract.IsOffer ? contract.Short : $"{contract.Short}  {ContractsScreen.Value(contract)}";
+            lines.Title.text = contract == null ? "" : contract.IsOffer ? contract.Short : $"{contract.Short}  {ContractsScreen.Standing(contract)}";
             lines.Info.text = contract == null || KioskMenu.Desk == null ? ""
                 : contract.Needs != null ? contract.Needs
                 : contract.IsOffer ? KioskMenu.Desk.Legend(contract)
                 // Not started yet: when its cars come (a contract's work starts at the first service after its first midnight).
                 : contract.Level < 1 ? (Runtime.RuntimeDesk.IsPassenger(contract.Id) ? "Starts at midnight; trains from 06:00" : "Starts at midnight; cars from 06:00")
                 : Runtime.RuntimeDesk.IsPassenger(contract.Id) ? $"{KioskMenu.Desk.Volume(contract, contract.RequestedLevel)} a day, {contract.OpenWaybills} open"
-                : $"{KioskMenu.Desk.Volume(contract, contract.RequestedLevel)} a day, {contract.OpenWaybills} open, {contract.OnOrder} ordered";
+                // Its cars still to move, as they are now (the Cars row has the page of them).
+                : cars?.Line ?? "";
         }
 
         public override void Disable()
@@ -222,6 +249,12 @@ namespace Contracts.Mod.Kiosk
                     break;
                 case InputAction.Confirm when selector.HasElements:
                     var choice = choices[IndexOfFirstDisplayedEntry + selector.Current];
+                    if (choice.Page != null)
+                    {
+                        // A page at a time: up and down turn the pages, confirm or cancel come back here.
+                        InfoPages.Show(kiosk, info, this, PageTitle(contract), choice.Page());
+                        break;
+                    }
                     if (choice.Explain != null)
                     {
                         // Not available, for a reason too long for the info line: the info screen says it in full.
@@ -254,6 +287,9 @@ namespace Contracts.Mod.Kiosk
                     break;
             }
         }
+
+        /// <summary>The Cars page's title: the contract's, to which the info screen adds the page.</summary>
+        internal static string PageTitle(ContractView c) => $"{c?.Short} cars";
 
         public override void PopulateTextsFromIndex(int startingIndex)
         {

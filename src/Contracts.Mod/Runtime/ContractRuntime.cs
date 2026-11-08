@@ -756,6 +756,79 @@ namespace Contracts.Mod.Runtime
             return result;
         }
 
+        /// <summary>
+        /// Each held industry or bridge contract's cars now (Core ContractCars), for the kiosk's
+        /// counts and Cars page: those billed to it and those bound for its industry, with what
+        /// each needs next, its job and where. A passenger contract has none. Read from the
+        /// waybills, the cars and their jobs as they are: nothing is saved.
+        /// </summary>
+        internal Dictionary<string, List<ContractCar>> CarsOfContracts()
+        {
+            var result = new Dictionary<string, List<ContractCar>>(StringComparer.Ordinal);
+            var held = new List<(string Id, Industry Industry, Bridge Bridge)>();
+            foreach (var c in State.Contracts)
+            {
+                var industry = Economy?.Industries != null && Economy.Industries.TryGetValue(c.Id, out var i) ? i : null;
+                var bridge = Economy?.Data?.Bridges.FirstOrDefault(b => b.Id == c.Id);
+                if (industry == null && bridge == null)
+                    continue;
+                result[c.Id] = new List<ContractCar>();
+                held.Add((c.Id, industry, bridge));
+            }
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            if (held.Count == 0 || registry == null || jobs == null)
+                return result;
+            var now = Clock;
+            foreach (var w in State.Waybills)
+            {
+                var theirs = held.Where(h => h.Id == w.Contract || (h.Industry != null && h.Id == w.Next)).ToList();
+                if (theirs.Count == 0)
+                    continue;
+                var car = registry.GetTrainCarByCarGuid(w.Guid);
+                if (car == null || car.logicCar == null)
+                    continue;
+                var job = jobs.GetJobOfCar(car.logicCar);
+                var track = car.logicCar.FrontBogieTrack;
+                var interchange = InterchangeYards.InterchangeOf(track);
+                var billed = new BilledCar
+                {
+                    Id = car.ID, Job = job?.ID, Contract = w.Contract, Next = w.Next, Cargo = w.Cargo,
+                    CarType = car.carLivery?.parentType?.id, Stage = StageOf(w.Stage),
+                    WaitsToSpot = job == null && WaitsToSpot(car, w), OnInterchange = interchange != null,
+                    // As "Cars without jobs" says places: an interchange's code, a station's yard.
+                    At = interchange != null ? InterchangeYards.CodeOf(interchange) : track == null ? "no track" : track.ID?.yardId,
+                    To = w.Next == null ? null : Economy.IsInterchange(w.Next) ? InterchangeYards.CodeOf(w.Next) : Economy.StationOf(w.Next),
+                    Note = Worked(w) && w.Ready is double ready && now is double t ? IndustryWork.When(ready, t) : null,
+                };
+                foreach (var h in theirs)
+                {
+                    var seen = h.Bridge != null ? Contracts.Core.Industries.ContractCars.Of(billed, h.Bridge)
+                        : Contracts.Core.Industries.ContractCars.Of(billed, h.Industry, Economy.Data);
+                    if (seen != null)
+                        result[h.Id].Add(seen);
+                }
+            }
+            return result;
+        }
+
+        /// <summary>A waybill's stage as the core names it.</summary>
+        internal static CarStage StageOf(Stage stage)
+        {
+            switch (stage)
+            {
+                case Stage.ToShipper: return CarStage.ToShipper;
+                case Stage.Loading: return CarStage.Loading;
+                case Stage.ToReceiver: return CarStage.ToReceiver;
+                case Stage.Unloading: return CarStage.Unloading;
+                case Stage.ToInterchange: return CarStage.ToInterchange;
+                case Stage.OffMap: return CarStage.OffMap;
+                case Stage.BeingLoaded: return CarStage.BeingLoaded;
+                case Stage.BeingUnloaded: return CarStage.BeingUnloaded;
+                default: return CarStage.Idle;
+            }
+        }
+
         private void LogJobless(string when)
         {
             var line = JoblessReport.LogLine(Jobless());

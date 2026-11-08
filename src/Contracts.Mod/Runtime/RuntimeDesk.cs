@@ -83,19 +83,44 @@ namespace Contracts.Mod.Runtime
 
         private static string Clip(string s) => s.Length <= ShortLength ? s : s.Substring(0, ShortLength - 1).TrimEnd() + ".";
 
+        /// <summary>
+        /// The player's contracts, those with the most cars still to move first (Ace, Discord,
+        /// 2026-11-08: "sort it by most remaining moves to least"); a passenger contract, or one
+        /// not started, counts none. Ties keep the order they were taken in.
+        /// </summary>
         public IReadOnlyList<ContractView> Mine()
         {
             if (Rt == null)
                 return new List<ContractView>();
-            return Rt.State.Contracts.Select(c => new ContractView
+            var cars = Rt.CarsOfContracts();
+            var mine = Rt.State.Contracts.Select(c => new ContractView
             {
                 Id = c.Id, Short = c.Short ?? c.Id, IsOffer = false, Level = c.Level, RequestedLevel = c.Requested,
                 Performance = (float?)ContractStanding.Average(c.History),
-                OpenWaybills = PassengerService.CityOf(c.Id) != null ? c.Due.Count + c.Running.Count
-                    : Rt.State.Waybills.Count(w => w.Contract == c.Id && w.Stage != Stage.Idle && w.Stage != Stage.OffMap),
-                OnOrder = 0,
+                OpenWaybills = PassengerService.CityOf(c.Id) != null ? c.Due.Count + c.Running.Count : 0,
+                ToMove = cars.TryGetValue(c.Id, out var theirs) && (c.Level >= 1 || theirs.Count > 0) ? ContractCars.ToMove(theirs) : (int?)null,
                 Needs = LicenseRules.Blocker(c.Id),
-            }).ToList();
+            });
+            return ContractCars.MostToMoveFirst(mine, v => v.ToMove).ToList();
+        }
+
+        public ContractCarsView Cars(ContractView contract)
+        {
+            if (Rt == null || contract == null || contract.IsOffer || IsPassenger(contract.Id) || Rt.State.Contracts.All(c => c.Id != contract.Id))
+                return null;
+            var cars = Rt.CarsOfContracts();
+            if (!cars.TryGetValue(contract.Id, out var theirs))
+                return null;
+            // The bridge's cars go by where they are billed: to NEI, then back to WI, as its legend says it.
+            var bridge = Rt.Economy?.Data?.Bridges.FirstOrDefault(b => b.Id == contract.Id);
+            var ends = bridge == null ? null
+                : new[] { bridge.From, bridge.To }.Select(InterchangeYards.CodeOf).OrderBy(e => e == "NEI" ? 0 : 1).ToArray();
+            return new ContractCarsView
+            {
+                ToMove = ContractCars.ToMove(theirs),
+                Line = ContractCars.ToMoveLine(theirs, ends),
+                Page = ContractCars.Page(theirs, ends),
+            };
         }
 
         public string Volume(ContractView contract, int level) =>

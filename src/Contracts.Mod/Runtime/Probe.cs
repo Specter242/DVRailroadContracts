@@ -35,6 +35,8 @@ namespace Contracts.Mod.Runtime
     ///   without three good days and granted with them, a raise asked for refused at midnight
     ///   when the day's score pulls the average down;
     /// - the saved state's round trip;
+    /// - the contract's cars at the kiosk: their counts against the cars, the list's order, the
+    ///   contract's page and its Cars page, and that their lines fit (views, probe-cars-*.png);
     /// - errors logged meanwhile. Then the game quits, if probe.txt says "quit".
     /// </summary>
     internal sealed class Probe : MonoBehaviour
@@ -144,6 +146,8 @@ namespace Contracts.Mod.Runtime
             yield return new WaitForSeconds(2f);
             Try("jobs after the second service", () => JobsCheck(rt, taken));
             Try("standing", () => StandingCheck(rt, taken));
+            // While the contract is still held: the pay check lowers and ends it.
+            yield return CarsCheck(rt, taken);
             yield return PayCheck(rt, taken);
             yield return SuspensionCheck(rt, taken);
             Try("save round trip", () => SaveCheck(rt));
@@ -1696,6 +1700,289 @@ namespace Contracts.Mod.Runtime
         /// while the cursor moves. A kiosk action or a service step over 100 ms, or a frame over
         /// 200 ms, is a problem.
         /// </summary>
+        /// <summary>
+        /// A contract's cars at the kiosk (Ace, Discord, 2026-11-08: "keep track of cars
+        /// in/out/waste ... sort it by most remaining moves to least"):
+        ///
+        /// - the counts match the cars, read here apart from the counter: every waybill billed to
+        ///   the contract or bound for its industry, the cars to move those billed for a move not
+        ///   yet made, each car's job the game's, and each car's line its load's;
+        /// - the list goes most cars to move first, with the count in its value column, even with a
+        ///   contract taken later put first in the held list;
+        /// - the contract's info line says "To move: ...", "Cars a day" is a row, "ordered" is gone,
+        ///   and the Cars row opens the paged list of the cars, by number and job;
+        /// - the lines fit: the shown ones, and the longest each can be (two-digit counts, a
+        ///   24-character name, a level change and 100%), on one line, the value clear of the name.
+        ///
+        /// Views of each screen at the kiosk: probe-cars-*.png.
+        /// </summary>
+        private IEnumerator CarsCheck(ContractRuntime rt, string contract)
+        {
+            var desk = KioskMenu.Desk;
+            var industry = contract != null && rt.Economy.Industries.TryGetValue(contract, out var ind) ? ind : null;
+            var mains = Resources.FindObjectsOfTypeAll<CareerManagerMainScreen>().Where(m => m.gameObject.scene.IsValid() && KioskMenu.TryGet(m, out _)).ToList();
+            var main = mains.FirstOrDefault(m => KioskPlaces.Of(m.screenSwitcher)?.IsInterchange == true) ?? mains.FirstOrDefault();
+            if (desk == null || industry == null || main == null || !KioskMenu.TryGet(main, out var x))
+            {
+                Problem($"cars: no contract ({contract}) or no kiosk with the Contracts menu");
+                yield break;
+            }
+            var kiosk = main.screenSwitcher;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+
+            // 1. The cars, read apart from the counter.
+            var moves = new HashSet<Stage> { Stage.ToShipper, Stage.Loading, Stage.ToReceiver, Stage.Unloading, Stage.ToInterchange };
+            var expected = rt.State.Waybills.Where(w => w.Contract == contract || w.Next == contract)
+                .Select(w => (W: w, Car: registry.GetTrainCarByCarGuid(w.Guid))).Where(p => p.Car != null).ToList();
+            var expectedToMove = expected.Count(p => moves.Contains(p.W.Stage));
+            List<ContractCar> counted = null;
+            Try("cars: the counter", () =>
+            {
+                counted = rt.CarsOfContracts().TryGetValue(contract, out var c) ? c : new List<ContractCar>();
+                Line($"cars: {contract}: {expected.Count} car(s) billed to it or bound for it, {expectedToMove} to move; by stage: " +
+                     string.Join(", ", expected.GroupBy(p => p.W.Stage).OrderBy(g => g.Key).Select(g => $"{g.Key} {g.Count()}")));
+                Line($"cars: the counter: {counted.Count} car(s), {ContractCars.ToMove(counted)} to move; " +
+                     string.Join(", ", counted.GroupBy(c2 => (c2.Line, c2.Step)).OrderBy(g => g.Key).Select(g => $"{g.Key.Line} {g.Key.Step} {g.Count()}")));
+                if (expected.Count == 0 || expectedToMove == 0)
+                    Problem($"cars: {contract} has no cars to move to check");
+                var ids = new HashSet<string>(expected.Select(p => p.Car.ID));
+                if (counted.Count != expected.Count || !ids.SetEquals(counted.Select(c2 => c2.Id)))
+                    Problem($"cars: the counter lists {counted.Count} car(s), not the {expected.Count} billed to {contract} or bound for it");
+                if (ContractCars.ToMove(counted) != expectedToMove)
+                    Problem($"cars: the counter has {ContractCars.ToMove(counted)} to move, not {expectedToMove}");
+                foreach (var (w, car) in expected)
+                {
+                    var c2 = counted.FirstOrDefault(c3 => c3.Id == car.ID);
+                    if (c2 == null)
+                        continue;
+                    var job = jobs.GetJobOfCar(car.logicCar)?.ID;
+                    if (c2.Job != job)
+                        Problem($"cars: {car.ID}'s job is {job ?? "none"}, the counter says {c2.Job ?? "none"}");
+                    // A loaded car's line is its load's at the industry: in for a material, out for a product, waste for waste.
+                    var load = car.logicCar.CurrentCargoTypeInCar;
+                    if (load != CargoType.None)
+                    {
+                        var role = industry.Lines.FirstOrDefault(l => l.Cargo.Contains(load.ToString()))?.Role;
+                        var want = role == LineRole.Material ? CarLine.In : role == LineRole.Waste ? CarLine.Waste : role == LineRole.Product ? CarLine.Out : (CarLine?)null;
+                        if (want.HasValue && c2.Line != want.Value && !(c2.Line == CarLine.In && w.Next == contract))
+                            Problem($"cars: {car.ID} carries {load}, {role} at {contract}, but is counted {c2.Line}");
+                    }
+                }
+            });
+            if (counted == null)
+                yield break;
+
+            // 2. The list: a contract taken now, put first in the held list, still goes after the one with cars to move.
+            var other = desk.Offers(new KioskPlace { Id = industry.Station, Name = industry.Station })
+                .FirstOrDefault(o => o.Needs == null && o.Id != contract && !Runtime.RuntimeDesk.IsPassenger(o.Id) && o.Id != Economy.BridgeId);
+            if (other != null)
+            {
+                desk.Take(other, 1);
+                var taken = rt.State.Contracts.FirstOrDefault(c => c.Id == other.Id);
+                if (taken != null)
+                {
+                    rt.State.Contracts.Remove(taken);
+                    rt.State.Contracts.Insert(0, taken);
+                }
+            }
+            var facing = kiosk.transform.TransformDirection(Vector3.left);
+            facing.y = 0f;
+            facing.Normalize();
+            var screen = kiosk.transform.TransformPoint(new Vector3(-0.10f, 1.32f, -0.08f));
+            var stand = screen + facing * 0.8f;
+            stand.y = kiosk.transform.position.y + 0.15f;
+            PlayerManager.TeleportPlayer(stand, Quaternion.LookRotation(-facing, Vector3.up), null, true);
+            yield return new WaitForSeconds(10f);
+            IEnumerator Shot(string what) => Capture($"probe-cars-{what}", screen + facing * 0.55f, screen);
+
+            kiosk.SetActiveDisplay(main);
+            yield return null;
+            kiosk.SetActiveDisplay(x.List);
+            yield return null;
+            var listLines = HarmonyLib.Traverse.Create(x.List).Field("lines").GetValue<KioskLines>();
+            var at = x.List.Entries.ToList().FindIndex(e => e.Id == contract);
+            for (var i = 0; i < at; i++)
+            {
+                kiosk.HandleInput(InputAction.Down);
+                yield return null;
+            }
+            var held = x.List.Entries.Where(e => !e.IsOffer && Runtime.RuntimeDesk.IsContract(e.Id)).ToList();
+            Line($"cars: the list: {string.Join("; ", x.List.Shown())}");
+            Line($"cars: held, in the list's order: {string.Join(", ", held.Select(e => $"{e.Id} {(e.ToMove.HasValue ? e.ToMove.Value.ToString() : "-")}"))}");
+            for (var i = 1; i < held.Count; i++)
+                if ((held[i].ToMove ?? 0) > (held[i - 1].ToMove ?? 0))
+                    Problem($"cars: the list puts {held[i - 1].Id} ({held[i - 1].ToMove}) before {held[i].Id} ({held[i].ToMove})");
+            var mine = held.FirstOrDefault(e => e.Id == contract);
+            if (mine == null || mine.ToMove != expectedToMove)
+                Problem($"cars: the list counts {mine?.ToMove} to move for {contract}, not {expectedToMove}");
+            if (other != null && held.FindIndex(e => e.Id == contract) > held.FindIndex(e => e.Id == other.Id))
+                Problem($"cars: {other.Id}, taken now with nothing to move, comes before {contract}");
+            var row = listLines.Rows.FirstOrDefault(r => r.Id.text == mine?.Short);
+            if (row.Id == null || !row.Value.text.StartsWith($"{expectedToMove} "))
+                Problem($"cars: {contract}'s row in the list is '{row.Id?.text} [{row.Value?.text}]', not its count first");
+            else
+            {
+                Fit("the list's row", row.Id, row.Value);
+                yield return Shot("list");
+                // The longest a row can be: a 24-character name, two-digit count, a level change and 100%.
+                var (id, value) = (row.Id.text, row.Value.text);
+                row.Id.text = "IME Iron Mine East Inter";
+                row.Value.text = "99 L2>3 100%";
+                Fit("the longest row", row.Id, row.Value);
+                yield return Shot("list-longest");
+                row.Id.text = id;
+                row.Value.text = value;
+            }
+
+            // 3. The contract's page.
+            x.Detail.Show(mine);
+            kiosk.SetActiveDisplay(x.Detail);
+            yield return null;
+            var detailLines = HarmonyLib.Traverse.Create(x.Detail).Field("lines").GetValue<KioskLines>();
+            var shown = x.Detail.Shown().ToList();
+            var cars = desk.Cars(mine);
+            Line($"cars: {contract}'s page: '{detailLines.Title.text}', info '{detailLines.Info.text}', rows: {string.Join("; ", shown)}");
+            if (cars == null || detailLines.Info.text != cars.Line || !detailLines.Info.text.StartsWith("To move: "))
+                Problem($"cars: the info line is '{detailLines.Info.text}', not the cars to move ({cars?.Line})");
+            var numbers = System.Text.RegularExpressions.Regex.Matches(detailLines.Info.text, @"\d+").Cast<System.Text.RegularExpressions.Match>().Sum(m => int.Parse(m.Value));
+            if (numbers != expectedToMove)
+                Problem($"cars: the info line's counts add up to {numbers}, not {expectedToMove}");
+            if (detailLines.Info.text.Contains("ordered") || shown.Any(s => s.Contains("ordered")))
+                Problem("cars: the contract's page still says ordered");
+            if (shown.Count < 2 || shown[0] != $"Cars [{expectedToMove} to move]" || shown[1] != $"Cars a day [{desk.Volume(mine, mine.Level)}]")
+                Problem($"cars: the first rows are '{string.Join("; ", shown.Take(2))}', not Cars and Cars a day");
+            Fit("the info line", detailLines.Info);
+            Fit("the Cars row", detailLines.Rows[0].Id, detailLines.Rows[0].Value);
+            yield return Shot("contract");
+            var info0 = detailLines.Info.text;
+            detailLines.Info.text = "To move: 99 out / 99 in / 99 waste";
+            Fit("the longest info line", detailLines.Info);
+            detailLines.Info.text = info0;
+
+            // 4. The Cars page: confirm on the Cars row.
+            var infoScreen = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
+            kiosk.HandleInput(InputAction.Confirm);
+            yield return null;
+            yield return null;
+            var (page, pages) = InfoPages.State(infoScreen);
+            var text = infoScreen.paragraph.text ?? "";
+            Line($"cars: the Cars page: '{infoScreen.title.text}', page {page} of {pages}:\n{text}");
+            if (!ReferenceEquals(kiosk.CurrentScreen, infoScreen) || page != 1 || !infoScreen.title.text.StartsWith(ContractScreen.PageTitle(mine)))
+                Problem($"cars: confirm on Cars opened {kiosk.CurrentScreen?.GetType().Name} titled '{infoScreen.title.text}', not the Cars page");
+            var missing = counted.Where(c => !text.Contains(c.Id) || (c.ToMove && c.Job != null && !text.Contains(c.Job))).Select(c => c.Id).ToList();
+            if (missing.Count > 0)
+                Problem($"cars: the Cars page leaves out {missing.Count} car(s) or their jobs: {string.Join(", ", missing.Take(10))}");
+            if (!text.StartsWith("Out: ") || !text.Contains("\n\nIn: ") || !text.Contains("\n\nWaste: "))
+                Problem("cars: the Cars page is not out, in and waste");
+            Fit("the Cars page's title", infoScreen.title);
+            yield return Shot("page");
+            var title0 = infoScreen.title.text;
+            infoScreen.title.text = "IME Iron Mine East Inter cars 9/9";
+            Fit("the longest Cars page title", infoScreen.title);
+            infoScreen.title.text = title0;
+            if (pages > 1)
+            {
+                kiosk.HandleInput(InputAction.Down);
+                yield return null;
+                yield return Shot("page-2");
+            }
+            kiosk.HandleInput(InputAction.Confirm);
+            yield return null;
+            if (!ReferenceEquals(kiosk.CurrentScreen, x.Detail))
+                Problem($"cars: confirm on the Cars page went to {kiosk.CurrentScreen?.GetType().Name}, not back to the contract");
+            kiosk.SetActiveDisplay(x.List);
+            kiosk.SetActiveDisplay(main);
+            if (other != null)
+                desk.End(held.First(e => e.Id == other.Id));
+            Line($"cars: done; held: {string.Join(", ", rt.State.Contracts.Select(c => c.Id))}");
+        }
+
+        /// <summary>
+        /// Whether a kiosk text fits: on one line and as wide as its box at most; with a second (a
+        /// row's value), the value's text clear of the first's. Logs the measures.
+        /// </summary>
+        private void Fit(string what, TMPro.TextMeshPro text, TMPro.TextMeshPro value = null)
+        {
+            try
+            {
+                string Measure(TMPro.TextMeshPro t)
+                {
+                    t.ForceMeshUpdate();
+                    var lines = t.textInfo?.lineCount ?? 0;
+                    var box = t.rectTransform.rect.width;
+                    var wants = t.GetPreferredValues(t.text).x;
+                    if (lines > 1 || (box > 0f && wants > box + 0.001f))
+                        Problem($"cars: {what}: '{t.text}' does not fit: {lines} line(s), {wants:F3} wide in {box:F3}");
+                    return $"'{t.text}' {lines} line(s), {wants:F3} of {box:F3} (wrap {t.textWrappingMode}, {t.overflowMode})";
+                }
+                var said = Measure(text);
+                if (value != null)
+                {
+                    said += "; value " + Measure(value);
+                    var axis = text.transform.right;
+                    float Edge(TMPro.TextMeshPro t, bool max)
+                    {
+                        var b = t.textBounds;
+                        var a = Vector3.Dot(t.transform.TransformPoint(b.min), axis);
+                        var c = Vector3.Dot(t.transform.TransformPoint(b.max), axis);
+                        return max ? Mathf.Max(a, c) : Mathf.Min(a, c);
+                    }
+                    var gap = Edge(value, false) - Edge(text, true);
+                    said += $"; gap {gap * 1000f:F1} mm";
+                    if (gap <= 0f)
+                        Problem($"cars: {what}: the value '{value.text}' runs into '{text.text}' ({gap * 1000f:F1} mm)");
+                }
+                Line($"cars: fit, {what}: {said}");
+            }
+            catch (Exception e)
+            {
+                Problem($"cars: measuring {what} failed: {e.Message}");
+            }
+        }
+
+        /// <summary>A view from a point toward another, with the player's camera held there (as the kiosk spike takes them).</summary>
+        private IEnumerator Capture(string file, Vector3 eye, Vector3 target)
+        {
+            var cam = PlayerManager.PlayerCamera;
+            if (cam == null)
+            {
+                Problem("no player camera for a view");
+                yield break;
+            }
+            var t = cam.transform;
+            var parent = t.parent;
+            var lp = t.localPosition;
+            var lr = t.localRotation;
+            var fov = cam.fieldOfView;
+            var rot = Quaternion.LookRotation(target - eye, Vector3.up);
+            Camera.CameraCallback hold = c =>
+            {
+                if (c == cam)
+                    c.transform.SetPositionAndRotation(eye, rot);
+            };
+            t.SetParent(null, true);
+            cam.fieldOfView = 50f;
+            Camera.onPreCull += hold;
+            for (var start = UnityEngine.Time.unscaledTime; UnityEngine.Time.unscaledTime - start < 1.5f;)
+            {
+                t.SetPositionAndRotation(eye, rot);
+                yield return null;
+            }
+            ScreenCapture.CaptureScreenshot(Path.Combine(folder, file + ".png"));
+            for (var start = UnityEngine.Time.unscaledTime; UnityEngine.Time.unscaledTime - start < 1f;)
+            {
+                t.SetPositionAndRotation(eye, rot);
+                yield return null;
+            }
+            Camera.onPreCull -= hold;
+            t.SetParent(parent, false);
+            t.localPosition = lp;
+            t.localRotation = lr;
+            cam.fieldOfView = fov;
+            Line($"view {file}.png");
+        }
+
         private IEnumerator KioskLoad(ContractRuntime rt)
         {
             var desk = KioskMenu.Desk;
@@ -1896,10 +2183,35 @@ namespace Contracts.Mod.Runtime
                     kiosk.SetActiveDisplay(x.Detail);
                 }));
                 yield return null;
+                var page = HarmonyLib.Traverse.Create(x.Detail).Field("lines").GetValue<KioskLines>();
+                Line($"kiosk load: {name}: '{page?.Title.text}', info '{page?.Info.text}', rows: {string.Join("; ", x.Detail.Shown())}");
+                if (entry.Id == Economy.BridgeId && !System.Text.RegularExpressions.Regex.IsMatch(page?.Info.text ?? "", @"^To move: \d+ to NEI / \d+ to WI$"))
+                    Problem($"kiosk load: the bridge's info line is '{page?.Info.text}', not its cars to move each way");
+                if (entry.Id == Economy.BridgeId && x.Detail.Shown().FirstOrDefault()?.StartsWith("Cars [") == true)
+                    Timed("the bridge's Cars page", Ms(() => Line($"kiosk load: the bridge's Cars page:\n{desk.Cars(entry)?.Page}")));
                 Timed($"back from {name} to the list", Ms(() => kiosk.HandleInput(InputAction.Cancel)));
                 yield return null;
             }
             yield return Frames("with the list open, the cursor moving", 15f, true);
+            // Every contract held: the list goes most cars to move first.
+            kiosk.SetActiveDisplay(main);
+            yield return null;
+            kiosk.SetActiveDisplay(x.List);
+            yield return null;
+            var order = x.List.Entries.Where(e => !e.IsOffer && Runtime.RuntimeDesk.IsContract(e.Id)).ToList();
+            Line($"kiosk load: held, in the list's order: {string.Join(", ", order.Select(e => $"{e.Id} {(e.ToMove.HasValue ? e.ToMove.Value.ToString() : "-")}"))}");
+            for (var i = 1; i < order.Count; i++)
+                if ((order[i].ToMove ?? 0) > (order[i - 1].ToMove ?? 0))
+                    Problem($"kiosk load: the list puts {order[i - 1].Id} ({order[i - 1].ToMove}) before {order[i].Id} ({order[i].ToMove})");
+            for (var i = 0; i < 3; i++)
+            {
+                kiosk.HandleInput(InputAction.Down);
+                yield return null;
+            }
+            {
+                var at = kiosk.transform.TransformPoint(new Vector3(-0.10f, 1.32f, -0.08f));
+                yield return Capture("probe-cars-list-all", at + facing * 0.55f, at);
+            }
             kiosk.SetActiveDisplay(main);
             Line($"kiosk load: {(slow.Count == 0 ? "nothing slow" : "slow: " + string.Join("; ", slow))}");
             if (slow.Count > 0)

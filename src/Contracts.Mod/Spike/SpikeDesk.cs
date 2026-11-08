@@ -100,7 +100,7 @@ namespace Contracts.Mod.Spike
             mine.Add(new ContractView
             {
                 Id = offer.Id, Short = offer.Short, IsOffer = false,
-                Level = 0, RequestedLevel = level, Performance = null, OpenWaybills = 0, OnOrder = 0,
+                Level = 0, RequestedLevel = level, Performance = null, OpenWaybills = 0,
             });
             Main.Log($"spike desk: took {offer.Id} at level {level}");
         }
@@ -125,6 +125,8 @@ namespace Contracts.Mod.Spike
         public double Owed => 0.0;
 
         public (int Count, string Text) Jobless() => (0, null);
+
+        public ContractCarsView Cars(ContractView mine) => null;
 
         public string Notice
         {

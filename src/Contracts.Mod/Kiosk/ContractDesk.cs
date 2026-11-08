@@ -15,8 +15,8 @@ namespace Contracts.Mod.Kiosk
         public int Level;           // 1-5; 0 for an offer, or a contract that starts at midnight
         public int RequestedLevel;  // the level from midnight; equal to Level when no change is asked
         public float? Performance;  // 0-1, for the player's own
-        public int OpenWaybills;
-        public int OnOrder;
+        public int OpenWaybills;    // a passenger contract's departures due or running; the jobless row's cars
+        public int? ToMove;         // the player's industry or bridge contract's cars still to move, once it has started; else null
         public string Needs;        // null, or the licenses the player lacks for it ("Needs Hazmat 2"), for the info line
     }
 
@@ -53,5 +53,19 @@ namespace Contracts.Mod.Kiosk
         string Notice { get; }
         /// <summary>The contract cars without a job now: how many, and the kiosk's paragraph on them (null for none).</summary>
         (int Count, string Text) Jobless();
+        /// <summary>The player's industry or bridge contract's cars now; null for a passenger contract or an offer.</summary>
+        ContractCarsView Cars(ContractView mine);
+    }
+
+    /// <summary>
+    /// A contract's cars now, for its screen (Contracts.Core ContractCars): how many are still to
+    /// move, the info line's counts ("To move: 3 out / 5 in / 1 waste"), and the Cars page (null
+    /// with no cars).
+    /// </summary>
+    internal sealed class ContractCarsView
+    {
+        public int ToMove;
+        public string Line;
+        public string Page;
     }
 }

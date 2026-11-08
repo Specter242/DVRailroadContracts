@@ -8,8 +8,10 @@ namespace Contracts.Mod.Kiosk
     /// The Contracts list: the shops, the player's contracts, then every contract on offer,
     /// at every kiosk (owner, 2026-11-03: "manage contracts without having to travel all over
     /// the map"), this place's own first. Each row shows the contract and, in the value column,
-    /// "offer", "locked" (licenses missing), or its level and performance. Confirm opens the
-    /// contract; cancel goes back to the main menu. It scrolls like the stock lists.
+    /// "offer", "locked" (licenses missing), or for the player's own its cars still to move, level
+    /// and performance ("9 L2 85%"); the player's own go most cars to move first (Ace, Discord,
+    /// 2026-11-08). Confirm opens the contract; cancel goes back to the main menu. It scrolls like
+    /// the stock lists, and is read again each time it opens.
     /// </summary>
     internal sealed class ContractsScreen : ScrollableDisplayScreen
     {
@@ -143,6 +145,12 @@ namespace Contracts.Mod.Kiosk
                 return $"{c.OpenWaybills}";
             if (c.IsOffer)
                 return c.Needs != null ? "locked" : "offer";
+            return c.ToMove.HasValue ? $"{c.ToMove.Value} {Standing(c)}" : Standing(c);
+        }
+
+        /// <summary>The player's contract's level and performance ("L2 85%", "L2>3 85%", "new L1"), for the list and the contract's title.</summary>
+        internal static string Standing(ContractView c)
+        {
             if (c.Level == 0)
                 return $"new L{c.RequestedLevel}";
             var perf = c.Performance.HasValue ? $" {c.Performance.Value * 100f:0}%" : "";

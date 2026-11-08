@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.10 (2026-11-08)
+
+- Each contract's page counts its cars still to move, out, in and waste, and its Cars row lists them by what each needs next, with car numbers and jobs; your contracts are listed most cars to move first.
+
 ## 0.1.9 (2026-11-07)
 
 - Sell the vehicles you bought back at the kiosk's Sell vehicles: half what you paid, less what its repairs and refills cost, never less than a tenth. A wreck sells where it stands.
