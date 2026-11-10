@@ -24,6 +24,8 @@ namespace Contracts.Mod.Runtime
     /// offices, before saved jobs load), as the stock stations are set up:
     ///
     /// - its range at the office: booklets are laid out on the office's table within 150 m;
+    /// - under an anchor named as a stock station's, so the Multiplayer mod pairs it with the
+    ///   office's job validator;
     /// - no cargo groups, warehouse machines or yard tracks of its own lists, so no generation
     ///   (stock, Persistent Jobs') sends cars there; and the career's stations make no jobs;
     /// - its name a translation key of its own, read here.
@@ -90,10 +92,18 @@ namespace Contracts.Mod.Runtime
                 return null;
             var key = KeyPrefix + code;
             Names[key] = InterchangeYards.TitleOf(interchange);
-            // Made inactive, so the components wake (Awake) with their settings in place.
+            // Made inactive, so the components wake (Awake) with their settings in place. It stands
+            // under an anchor in its office named as a stock station's ("OilWellCentral_office_anchor"
+            // for the validator under "OilWellCentral"): the Multiplayer mod pairs a station with the
+            // job validator whose parent's name, with "_office_anchor", is its parent's, and through
+            // that pair the players other than the host take and hand in jobs at the office
+            // (results/probe-mp3-before, 2026-11-09: the interchanges' validators were paired with none).
+            var validator = office.GetComponentsInChildren<JobValidator>(true).FirstOrDefault();
+            var anchor = new GameObject($"{(validator != null ? validator.transform.parent.name : office.name)}_office_anchor");
+            anchor.transform.SetParent(office, false);
             var go = new GameObject($"[interchange station] {code}");
             go.SetActive(false);
-            go.transform.SetParent(office, false);
+            go.transform.SetParent(anchor.transform, false);
             var range = go.AddComponent<StationJobGenerationRange>();
             range.stationCenterAnchor = go.transform;
             var rules = go.AddComponent<StationProceduralJobsRuleset>();

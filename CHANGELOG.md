@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.11 (2026-11-09)
+
+- In multiplayer, stations no longer spawn locomotives, so a new career has only its one DE2.
+- In multiplayer, players other than the host can take and hand in jobs at the interchange offices. Their jobs to and from the interchanges need Interchange Yards 0.1.7.
+- While days last less than 24 hours, the kiosk's Contracts list has a Day length row: its page says how to set 24-hour days and what sleeping costs.
+
 ## 0.1.10 (2026-11-08)
 
 - Each contract's page counts its cars still to move, out, in and waste, and its Cars row lists them by what each needs next, with car numbers and jobs; your contracts are listed most cars to move first.

@@ -15,6 +15,7 @@ using DV.RenderTextureSystem.BookletRender;
 using DV.ThingTypes;
 using DV.ThingTypes.TransitionHelpers;
 using DV.Utils;
+using HarmonyLib;
 using UnityEngine;
 
 namespace Contracts.Mod.Runtime
@@ -58,6 +59,7 @@ namespace Contracts.Mod.Runtime
                 return;
             quitAfter = File.ReadAllText(trigger).IndexOf("quit", StringComparison.OrdinalIgnoreCase) >= 0;
             saveCheck = File.ReadAllText(trigger).IndexOf("save", StringComparison.OrdinalIgnoreCase) >= 0;
+            UseLiteNetLib();
             var go = new GameObject("[contracts probe]");
             DontDestroyOnLoad(go);
             var probe = go.AddComponent<Probe>();
@@ -75,6 +77,205 @@ namespace Contracts.Mod.Runtime
                 probe.StartCoroutine(saveCheck ? probe.SaveRun() : probe.Run());
             };
             Main.Log("probe requested");
+        }
+
+        // ------------------------------------------------------------ Multiplayer
+
+        private static System.Reflection.ConstructorInfo steamTransport, liteTransport;
+        private static bool multiplayerLoaded;
+
+        /// <summary>
+        /// The Multiplayer mod, if it runs here, connects even a single-player game through Steam's
+        /// networking, which can't reach Steam in the clone: the local connection ends
+        /// "Misc_SteamConnectivity" at once, and the game goes back to the main menu, again and
+        /// again (results/mp-diag1, 2026-11-09). Its managers get the mod's own LiteNetLib transport
+        /// instead, which needs no Steam. Probe runs only; the host's side of the mod is otherwise
+        /// as it is.
+        /// </summary>
+        private static void UseLiteNetLib()
+        {
+            try
+            {
+                var manager = AccessTools.TypeByName("Multiplayer.Networking.Managers.NetworkManager");
+                if (manager == null)
+                    return;
+                multiplayerLoaded = true;
+                steamTransport = AccessTools.Constructor(AccessTools.TypeByName("Multiplayer.Networking.TransportLayers.SteamWorksTransport"), Type.EmptyTypes);
+                liteTransport = AccessTools.Constructor(AccessTools.TypeByName("Multiplayer.Networking.TransportLayers.LiteNetLibTransport"), Type.EmptyTypes);
+                var made = AccessTools.GetDeclaredConstructors(manager).FirstOrDefault(c => !c.IsStatic);
+                if (steamTransport == null || liteTransport == null || made == null)
+                {
+                    Main.Warn("probe: Multiplayer's transports are not where they were; its runs need Steam's networking");
+                    return;
+                }
+                new HarmonyLib.Harmony("Contracts.probe").Patch(made, transpiler: new HarmonyLib.HarmonyMethod(typeof(Probe), nameof(SwapTransport)));
+                Main.Log("probe: Multiplayer runs on its LiteNetLib transport in this run");
+            }
+            catch (Exception e)
+            {
+                Main.Error($"probe: switching Multiplayer's transport failed: {e.Message}");
+            }
+        }
+
+        private static IEnumerable<HarmonyLib.CodeInstruction> SwapTransport(IEnumerable<HarmonyLib.CodeInstruction> code)
+        {
+            foreach (var i in code)
+            {
+                if (i.opcode == System.Reflection.Emit.OpCodes.Newobj && Equals(i.operand, steamTransport))
+                    i.operand = liteTransport;
+                yield return i;
+            }
+        }
+
+        /// <summary>
+        /// Every interchange track is found by the name a stock track with its ID would have
+        /// ("[Y]_[WI]_[A-01-X]"), as the Multiplayer mod's players look a job's tracks up
+        /// (Interchange Yards 0.1.7; Blaze221, Nexus, 2026-11-08: no booklets for the players).
+        /// </summary>
+        private void TrackNamesCheck()
+        {
+            var registry = SingletonBehaviour<RailTrackRegistryBase>.Instance;
+            var tracks = InterchangeYards.All().SelectMany(kv => kv.Value).ToList();
+            var missing = tracks.Where(t => registry.GetTrackWithName(t.ID.RailTrackGameObjectID)?.LogicTrack() != t).Select(t => t.ID.FullID).ToList();
+            Line($"track names: {tracks.Count - missing.Count} of {tracks.Count} interchange tracks found by their stock names" +
+                 (tracks.Count > 0 ? $", e.g. {tracks[0].ID.RailTrackGameObjectID}" : ""));
+            if (tracks.Count == 0 || missing.Count > 0)
+                Problem($"track names: not found by their stock names: {string.Join(", ", missing)}");
+        }
+
+        /// <summary>
+        /// With the Multiplayer mod, on the host (the clone's game is one): its transport, its own
+        /// station locomotives blocked (spawning one on an empty spawn track leaves it empty), and
+        /// the job validator it pairs with each station, the interchanges' among them (it pairs a
+        /// validator whose parent is X with the station under "X_office_anchor"; a player other
+        /// than the host takes and hands in jobs through it).
+        /// </summary>
+        private IEnumerator MultiplayerCheck()
+        {
+            if (!multiplayerLoaded)
+            {
+                Line("multiplayer: not loaded; its checks skipped");
+                yield break;
+            }
+            var lifecycleType = AccessTools.TypeByName("Multiplayer.Components.Networking.NetworkLifecycle");
+            var lifecycle = lifecycleType == null ? null : FindObjectOfType(lifecycleType);
+            var server = lifecycle == null ? null : HarmonyLib.Traverse.Create(lifecycle).Property("Server").GetValue();
+            var transport = server == null ? null : HarmonyLib.Traverse.Create(server).Field("transport").GetValue();
+            Line($"multiplayer: host {(server != null ? "running" : "not running")}, transport {transport?.GetType().Name ?? "?"}");
+            if (server == null)
+                Problem("multiplayer: no host running");
+
+            // B. Its own station locomotives.
+            Line($"multiplayer: its station locomotives blocked: {CareerRules.MultiplayerLocomotivesBlocked}");
+            if (!CareerRules.MultiplayerLocomotivesBlocked)
+                Problem("multiplayer: its station locomotives are not blocked");
+            var spawnType = AccessTools.TypeByName("Multiplayer.Patches.World.StationLocoSpawner_Start_Patch");
+            var spawn = spawnType == null ? null : AccessTools.Method(spawnType, "SpawnLocomotives");
+            int Locos(Track t) => t?.GetCarsFullyOnTrack().Count(c => CarTypes.IsLocomotive(c.carType)) ?? -1;
+            var spawners = FindObjectsOfType<StationLocoSpawner>()
+                .Select(sp => (Spawner: sp, Track: HarmonyLib.Traverse.Create(sp).Field("locoSpawnTrack").GetValue<RailTrack>()?.LogicTrack()))
+                .Where(x => x.Track != null).ToList();
+            var empty = spawners.Where(x => Locos(x.Track) == 0).ToList();
+            Line($"multiplayer: {spawners.Count} station locomotive spawners, {empty.Count} with an empty spawn track");
+            if (spawn == null || empty.Count == 0)
+                Problem("multiplayer: no spawning of its own, or no empty spawn track, to try");
+            else
+            {
+                var carsBefore = SingletonBehaviour<CarSpawner>.Instance.AllCars.Count;
+                foreach (var x in empty.Take(3))
+                    spawn.Invoke(null, new object[] { x.Spawner });
+                yield return new WaitForSeconds(3f);
+                var after = empty.Take(3).Select(x => $"{x.Track.ID.FullDisplayID} {Locos(x.Track)}").ToList();
+                var carsAfter = SingletonBehaviour<CarSpawner>.Instance.AllCars.Count;
+                Line($"multiplayer: its spawning run on {string.Join(", ", after)} locomotive(s); cars {carsBefore} before, {carsAfter} after");
+                if (empty.Take(3).Any(x => Locos(x.Track) != 0) || carsAfter != carsBefore)
+                    Problem("multiplayer: its station spawning made a locomotive");
+            }
+
+            // C. The validators it pairs with the stations.
+            var nscType = AccessTools.TypeByName("Multiplayer.Components.Networking.World.NetworkedStationController");
+            var fromStation = nscType == null ? null : AccessTools.Method(nscType, "GetFromStationController");
+            if (fromStation == null)
+            {
+                Problem("multiplayer: its networked stations are not where they were");
+                yield break;
+            }
+            JobValidator ValidatorOf(StationController sc)
+            {
+                var args = new object[] { sc, null };
+                return (bool)fromStation.Invoke(null, args) && args[1] != null ? HarmonyLib.Traverse.Create(args[1]).Field("JobValidator").GetValue<JobValidator>() : null;
+            }
+            var stations = StationController.allStations.Where(sc => sc != null && sc.logicStation != null).ToList();
+            var paired = stations.Where(sc => !InterchangeStations.Is(sc) && ValidatorOf(sc) != null).Select(sc => sc.stationInfo.YardID).ToList();
+            var stock = stations.Where(sc => !InterchangeStations.Is(sc)).ToList();
+            Line($"multiplayer: stock stations with a validator: {paired.Count} of {stock.Count}");
+            var example = stock.FirstOrDefault(sc => ValidatorOf(sc) != null);
+            if (example != null)
+                Line($"multiplayer: e.g. {example.stationInfo.YardID}: station under '{example.transform.parent?.name}', validator under '{ValidatorOf(example).transform.parent?.name}'");
+            foreach (var sc in stations.Where(InterchangeStations.Is))
+            {
+                // The office is the object under Offices_w3 (its station's anchor's name starts as the office's).
+                var office = sc.transform;
+                while (office != null && office.parent != null && office.parent.name != "Offices_w3")
+                    office = office.parent;
+                if (office != null && !office.name.StartsWith("[interchange office] ", StringComparison.Ordinal))
+                    office = null;
+                var own = office == null ? new JobValidator[0] : office.GetComponentsInChildren<JobValidator>(true);
+                var mine = ValidatorOf(sc);
+                Line($"multiplayer: {sc.stationInfo.YardID}: station under '{sc.transform.parent?.name}', office validators under " +
+                     $"{string.Join(", ", own.Select(v => $"'{v.transform.parent?.name}'"))}; paired with {(mine == null ? "none" : own.Contains(mine) ? "its office's" : "another's")}");
+                if (mine == null || !own.Contains(mine))
+                    Problem($"multiplayer: {sc.stationInfo.YardID}'s office validator is not paired with it");
+            }
+        }
+
+        /// <summary>
+        /// Each job's tasks made again from the Multiplayer mod's own data for them, as a player
+        /// other than the host makes them (TaskNetworkDataFactory, then ToTask): they must build,
+        /// on the same tracks.
+        /// </summary>
+        private void MultiplayerJobsCheck()
+        {
+            if (!multiplayerLoaded)
+                return;
+            var factory = AccessTools.TypeByName("Multiplayer.Networking.Data.Jobs.TaskNetworkDataFactory");
+            var convert = factory == null ? null : AccessTools.Method(factory, "ConvertTask", new[] { typeof(Task) });
+            if (convert == null)
+            {
+                Problem("multiplayer jobs: its task data is not where it was");
+                return;
+            }
+            string Tracks(TaskData d) => d == null ? "" : d.nestedTasks != null && d.nestedTasks.Count > 0
+                ? string.Join(";", d.nestedTasks.Select(n => Tracks(n.GetTaskData())))
+                : $"{d.startTrack?.ID?.FullID}>{d.destinationTrack?.ID?.FullID}";
+            var jobs = StationController.allStations.Where(sc => sc?.logicStation != null).SelectMany(sc => sc.logicStation.availableJobs).Take(60).ToList();
+            var built = 0;
+            var failed = new List<string>();
+            foreach (var job in jobs)
+            {
+                try
+                {
+                    foreach (var task in job.tasks)
+                    {
+                        var data = convert.Invoke(null, new object[] { task });
+                        var toTask = AccessTools.Method(data.GetType(), "ToTask");
+                        var args = new object[] { new Dictionary<ushort, Task>() };
+                        var again = (Task)toTask.Invoke(data, args);
+                        if (Tracks(again.GetTaskData()) != Tracks(task.GetTaskData()))
+                            throw new Exception($"tracks {Tracks(again.GetTaskData())}, not {Tracks(task.GetTaskData())}");
+                    }
+                    built++;
+                }
+                catch (Exception e)
+                {
+                    var why = e is System.Reflection.TargetInvocationException t && t.InnerException != null ? t.InnerException : e;
+                    failed.Add($"{job.ID} ({why.GetType().Name}: {why.Message})");
+                }
+            }
+            Line($"multiplayer jobs: {built} of {jobs.Count} job(s) built again from Multiplayer's data, on the same tracks" +
+                 (failed.Count > 0 ? $"; not: {string.Join("; ", failed.Take(8))}" : ""));
+            if (jobs.Count == 0 || failed.Count > 0)
+                Problem($"multiplayer jobs: {failed.Count} of {jobs.Count} job(s) don't build as a player other than the host builds them");
         }
 
         private void Line(string text)
@@ -111,6 +312,8 @@ namespace Contracts.Mod.Runtime
             Try("economy", () => EconomyCheck(rt));
             Try("industry spots", () => SpotsCheck(rt));
             Try("interchange stations", () => StationsCheck());
+            Try("interchange tracks by their stock names", TrackNamesCheck);
+            yield return MultiplayerCheck();
             Try("starter", StarterCheck);
             yield return null;
             Try("shop", ShopCheck);
@@ -120,6 +323,7 @@ namespace Contracts.Mod.Runtime
             Try("contract and service", () => taken = ServiceCheck(rt));
             yield return new WaitForSeconds(3f);
             Try("jobs", () => JobsCheck(rt, taken));
+            Try("jobs as Multiplayer's players build them", MultiplayerJobsCheck);
             yield return BookletsCheck(taken);
             yield return Legs(rt, taken);
             // The industries work the cars spotted, and send them out; the legs then work the outbound.
@@ -1891,6 +2095,36 @@ namespace Contracts.Mod.Runtime
             yield return null;
             if (!ReferenceEquals(kiosk.CurrentScreen, x.Detail))
                 Problem($"cars: confirm on the Cars page went to {kiosk.CurrentScreen?.GetType().Name}, not back to the contract");
+            // 5. The day length's row and page (Vertigo75, Nexus, 2026-11-09): the clone's days are the presets' 2 h.
+            kiosk.SetActiveDisplay(main);
+            yield return null;
+            kiosk.SetActiveDisplay(x.List);
+            yield return null;
+            var day = desk.DayLength;
+            var dayAt = x.List.Entries.ToList().FindIndex(e => e.Id == RuntimeDesk.DayLengthId);
+            Line($"day length: {DV.Globals.G?.GameParams?.DayLengthInMinutes} min; row {(dayAt < 0 ? "none" : $"{dayAt + 1} [{ContractsScreen.Value(x.List.Entries[dayAt])}]")}; notice '{desk.Notice}'");
+            if (day == null || dayAt < 0)
+                Problem("day length: no Day length row with days shorter than 24 hours");
+            else
+            {
+                for (var i = 0; i < dayAt; i++)
+                {
+                    kiosk.HandleInput(InputAction.Down);
+                    yield return null;
+                }
+                kiosk.HandleInput(InputAction.Confirm);
+                yield return null;
+                yield return null;
+                var dayText = infoScreen.paragraph.text ?? "";
+                Line($"day length: page '{infoScreen.title.text}', {InfoPages.State(infoScreen).Count} page(s):\n{dayText}");
+                if (!ReferenceEquals(kiosk.CurrentScreen, infoScreen) || !infoScreen.title.text.StartsWith(ContractsScreen.DayLengthTitle) || dayText != day.Value.Page)
+                    Problem($"day length: confirm opened {kiosk.CurrentScreen?.GetType().Name} titled '{infoScreen.title.text}', not its page");
+                yield return Shot("daylength");
+                kiosk.HandleInput(InputAction.Confirm);
+                yield return null;
+                if (!ReferenceEquals(kiosk.CurrentScreen, x.List))
+                    Problem($"day length: confirm on its page went to {kiosk.CurrentScreen?.GetType().Name}, not back to the list");
+            }
             kiosk.SetActiveDisplay(x.List);
             kiosk.SetActiveDisplay(main);
             if (other != null)

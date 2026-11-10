@@ -41,6 +41,7 @@ namespace Contracts.Mod
                 {
                     WorldStreamingInit.LoadingFinished += Runtime.ContractRuntime.OnWorldLoaded;
                     Runtime.CareerRules.GuardPassengerJobs(harmony);
+                    Runtime.CareerRules.GuardMultiplayerLocomotives(harmony);
                     Runtime.Passengers.Install(harmony);
                     Runtime.InterchangeStations.Install();
                     Runtime.InterchangeStations.GuardPersistentJobs(harmony);

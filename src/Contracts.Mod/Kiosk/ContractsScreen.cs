@@ -53,6 +53,10 @@ namespace Contracts.Mod.Kiosk
             entries.Add(new ContractView { Id = Runtime.RuntimeDesk.CoachShopId, Short = "Buy coaches", IsOffer = false });
             // Bought vehicles sold back (owner, 2026-11-07: "You should be re-railing them or selling them").
             entries.Add(new ContractView { Id = Runtime.RuntimeDesk.SellId, Short = "Sell vehicles", IsOffer = false });
+            // Days shorter than 24 hours: a row whose page says what that does to contracts and how to
+            // set 24-hour days (Vertigo75, Nexus, 2026-11-09: "It won't let me change the time at all").
+            if (desk.DayLength != null)
+                entries.Add(new ContractView { Id = Runtime.RuntimeDesk.DayLengthId, Short = DayLengthTitle, IsOffer = false });
             // Contract cars with no job now (set out for the pickup, idle...): a row that says which and why.
             var jobless = desk.Jobless();
             if (jobless.Count > 0)
@@ -116,6 +120,12 @@ namespace Contracts.Mod.Kiosk
                         InfoPages.Show(kiosk, info, this, JoblessTitle, KioskMenu.Desk?.Jobless().Text ?? "Every contract car has a job.");
                         break;
                     }
+                    if (entry.Id == Runtime.RuntimeDesk.DayLengthId)
+                    {
+                        var dayInfo = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
+                        InfoPages.Show(kiosk, dayInfo, this, DayLengthTitle, KioskMenu.Desk?.DayLength?.Page ?? "Days last 24 hours.");
+                        break;
+                    }
                     detail.Show(entry);
                     kiosk.SetActiveDisplay(detail);
                     break;
@@ -136,6 +146,7 @@ namespace Contracts.Mod.Kiosk
         }
 
         public const string JoblessTitle = "Cars without jobs";
+        public const string DayLengthTitle = "Day length";
 
         internal static string Value(ContractView c)
         {
@@ -143,6 +154,8 @@ namespace Contracts.Mod.Kiosk
                 return "shop";
             if (c.Id == Runtime.RuntimeDesk.JoblessId)
                 return $"{c.OpenWaybills}";
+            if (c.Id == Runtime.RuntimeDesk.DayLengthId)
+                return KioskMenu.Desk?.DayLength?.Value ?? "";
             if (c.IsOffer)
                 return c.Needs != null ? "locked" : "offer";
             return c.ToMove.HasValue ? $"{c.ToMove.Value} {Standing(c)}" : Standing(c);

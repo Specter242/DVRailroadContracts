@@ -25,9 +25,11 @@ namespace Contracts.Mod.Runtime
         public const string JoblessId = "#jobless";
         /// <summary>The Contracts list's row for selling bought vehicles back (VehicleSales).</summary>
         public const string SellId = "#sell";
+        /// <summary>The Contracts list's row on the day length, while days are shorter than 24 hours (Core DayLength).</summary>
+        public const string DayLengthId = "#daylength";
 
-        /// <summary>Whether a list entry is a contract (not a shop or the jobless cars' row).</summary>
-        public static bool IsContract(string id) => ShopOf(id) == null && id != JoblessId && id != SellId;
+        /// <summary>Whether a list entry is a contract (not a shop, the jobless cars' row or the day length's).</summary>
+        public static bool IsContract(string id) => ShopOf(id) == null && id != JoblessId && id != SellId && id != DayLengthId;
 
         /// <summary>The shop a menu entry opens, or null for a contract.</summary>
         public static LocoShop.Kind? ShopOf(string id) =>
@@ -203,6 +205,12 @@ namespace Contracts.Mod.Runtime
         }
 
         public double Owed => Rt?.State.Owed ?? 0.0;
+
+        public (string Value, string Page)? DayLength => DayLengthOf(DV.Globals.G?.GameParams?.DayLengthInMinutes ?? 0f);
+
+        /// <summary>A day length's row value and page, or null for 24-hour days (Core DayLength).</summary>
+        internal static (string Value, string Page)? DayLengthOf(double minutes) =>
+            Contracts.Core.Industries.DayLength.Page(minutes) is string page ? (Contracts.Core.Industries.DayLength.Value(minutes), page) : ((string, string)?)null;
 
         public string Notice
         {

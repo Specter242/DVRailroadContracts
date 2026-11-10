@@ -128,6 +128,8 @@ namespace Contracts.Mod.Spike
 
         public ContractCarsView Cars(ContractView mine) => null;
 
+        public (string Value, string Page)? DayLength => Runtime.RuntimeDesk.DayLengthOf(Globals.G?.GameParams?.DayLengthInMinutes ?? 0f);
+
         public string Notice
         {
             get

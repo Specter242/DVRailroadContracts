@@ -55,6 +55,8 @@ namespace Contracts.Mod.Kiosk
         (int Count, string Text) Jobless();
         /// <summary>The player's industry or bridge contract's cars now; null for a passenger contract or an offer.</summary>
         ContractCarsView Cars(ContractView mine);
+        /// <summary>The game's day length, when shorter than 24 hours: the list row's value ("2 h") and its page; else null.</summary>
+        (string Value, string Page)? DayLength { get; }
     }
 
     /// <summary>

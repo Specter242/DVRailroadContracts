@@ -20,7 +20,7 @@ namespace Contracts.Mod.Runtime
     ///   in Persistent Jobs, which then skips its one round of car spawning, and Passenger Jobs'
     ///   generation, which Persistent Jobs gates on the same flag (design, rule 3). The stock
     ///   generator is blocked too.
-    /// - Stations never spawn locomotives (StationLocoSpawner).
+    /// - Stations never spawn locomotives (StationLocoSpawner, and the Multiplayer mod's own spawning).
     /// - A new career starts with one DE2, owned (as a garage's vehicle is), on the locomotive
     ///   track of the station the player starts at, and the Manual Service licence.
     /// - Contract cars are kept from the unused-car deleter and from Persistent Jobs' reassigning
@@ -143,6 +143,34 @@ namespace Contracts.Mod.Runtime
         {
             private static bool Prefix() => false;
         }
+
+        /// <summary>Whether the Multiplayer mod's own station locomotives are blocked (for the probe).</summary>
+        internal static bool MultiplayerLocomotivesBlocked { get; private set; }
+
+        /// <summary>
+        /// The Multiplayer mod's own station locomotives, if it is installed: it blocks the
+        /// spawner's Update as this mod does, and on the host spawns a station's locomotives
+        /// itself when any player comes near (its StationLocoSpawner.Start patch). Those are
+        /// blocked too, so a career keeps its one DE2 in Multiplayer (Blaze221, Nexus, 2026-11-08:
+        /// "locomotives spawned at the MF and SM"). Patched by hand: the type is another mod's.
+        /// </summary>
+        public static void GuardMultiplayerLocomotives(Harmony harmony)
+        {
+            var patch = AccessTools.TypeByName("Multiplayer.Patches.World.StationLocoSpawner_Start_Patch");
+            if (patch == null)
+                return;
+            var spawn = AccessTools.Method(patch, "SpawnLocomotives");
+            if (spawn == null)
+            {
+                Main.Warn("Multiplayer: its station locomotive spawning is not where it was; stations may spawn locomotives in Multiplayer");
+                return;
+            }
+            harmony.Patch(spawn, prefix: new HarmonyMethod(AccessTools.Method(typeof(CareerRules), nameof(NoMultiplayerLocomotives))));
+            MultiplayerLocomotivesBlocked = true;
+            Main.Log("Multiplayer: its station locomotives are blocked too");
+        }
+
+        private static bool NoMultiplayerLocomotives() => false;
 
         // ------------------------------------------------------------ protection
 
