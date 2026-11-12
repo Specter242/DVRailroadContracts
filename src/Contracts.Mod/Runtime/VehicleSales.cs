@@ -16,7 +16,9 @@ namespace Contracts.Mod.Runtime
     /// <summary>
     /// Selling the vehicles the player bought back at the kiosk (owner, 2026-11-07: "you
     /// shouldn't be clearing trains that you bought. You should be re-railing them or selling
-    /// them. Clearing is essentially deleting the train"). Clear stays as the game has it.
+    /// them. Clearing is essentially deleting the train"). The comms radio's Clear no longer
+    /// takes one of them (owner, 2026-11-10; <see cref="Protect"/>): it deleted a bought
+    /// vehicle for good, with nothing back.
     ///
     /// - **What is sold:** a vehicle bought at the kiosk, with what came with it (a locomotive's
     ///   tender, a train of coaches), or a new career's starter, wherever it stands, a wreck
@@ -71,8 +73,29 @@ namespace Contracts.Mod.Runtime
                     continue;
                 state.Bought.RemoveAll(p => p.Guid == guid);
                 state.Bought.Add(new Purchase { Guid = guid, Set = set, Price = coaches ? price / cars.Count : i == 0 ? price : 0.0 });
+                cars[i].preventDelete = true;
             }
         }
+
+        /// <summary>
+        /// Keeps the vehicles the kiosk sells from the comms radio's Clear, which passes over a car
+        /// with the game's own preventDelete flag (as it does the player's car). The flag is not
+        /// saved, so it is set at each load, and on each purchase (<see cref="Record"/>). Selling
+        /// at the kiosk is how they go. Returns how many are kept.
+        /// </summary>
+        public static int Protect()
+        {
+            var recorded = new HashSet<string>((State?.Bought ?? new List<Purchase>()).Where(p => p.Guid != null).Select(p => p.Guid), StringComparer.Ordinal);
+            var n = 0;
+            foreach (var car in SingletonBehaviour<CarSpawner>.Instance?.AllCars?.Where(c => Sellable(c, recorded)).ToList() ?? new List<TrainCar>())
+            {
+                car.preventDelete = true;
+                n++;
+            }
+            return n;
+        }
+
+        private static bool IsLocomotive(Unit u) => u.Cars.Any(c => c != null && CarTypes.IsLocomotive(c.carLivery));
 
         /// <summary>
         /// Whether a car is one the player owns that the kiosk sells, not a garage's: one recorded
@@ -171,6 +194,9 @@ namespace Contracts.Mod.Runtime
         {
             if (PlayerManager.Car != null && cars.Contains(PlayerManager.Car))
                 return "You're on it. Step off first.";
+            // In Multiplayer, any player's (Kiosk.DeskNet; the add-on gives the cars they stand on).
+            if (Kiosk.DeskNet.CarsWithPlayers?.Invoke().Any(c => c != null && cars.Contains(c)) == true)
+                return "A player is on it. They step off first.";
             if (cars.SelectMany(Neighbours).Any(n => !cars.Contains(n)))
                 return "It's coupled to other cars. Uncouple it first.";
             var jobs = SingletonBehaviour<JobsManager>.Instance;
@@ -190,9 +216,17 @@ namespace Contracts.Mod.Runtime
                 why = $"Sell {u.Label} for ${u.Offer:N0}? That's half {paid}, less ${u.Owed:N0} for its repairs and refills.";
             else
                 why = $"Sell {u.Label} for ${u.Offer:N0}, its scrap value? Its repairs and refills (${u.Owed:N0}) cost more than half {paid}.";
-            var coachesLeft = !u.Coaches ? -1 : Owned().Where(o => o.Coaches).Sum(o => o.Cars.Count) - u.Cars.Count;
+            var owned = Owned();
+            var coachesLeft = !u.Coaches ? -1 : owned.Where(o => o.Coaches).Sum(o => o.Cars.Count) - u.Cars.Count;
             var warn = coachesLeft == 0 && (State?.Contracts.Any(c => RuntimeDesk.IsPassenger(c.Id)) ?? false)
                 ? " Your passenger trains wait until you have coaches again." : "";
+            // The only locomotive: said before it goes, with whether the cash buys another.
+            if (IsLocomotive(u) && owned.Count(IsLocomotive) <= 1)
+            {
+                var cheapest = LocoShop.Catalogue(LocoShop.Kind.Locomotives).OrderBy(i => i.Price).FirstOrDefault();
+                if (cheapest != null)
+                    warn += Core.Shop.VehicleSale.LastLocomotive(LocoShop.Money + u.Offer, cheapest.Price, cheapest.Name);
+            }
             return why + " It's taken away at once, wherever it stands." + warn;
         }
 

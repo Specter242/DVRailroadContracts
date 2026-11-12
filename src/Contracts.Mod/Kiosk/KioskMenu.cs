@@ -147,9 +147,10 @@ namespace Contracts.Mod.Kiosk
 
         internal static void Open(CareerManagerMainScreen main, Extension extension)
         {
-            if (Multiplayer.IsClient)
+            // A player who joined a Multiplayer game reads the host's contracts (DeskNet), once the host has sent them.
+            if (Multiplayer.IsClient && !DeskNet.ClientReady(out var why))
             {
-                ShowInfo(main.infoScreen, main, Entry, "Contracts are managed by the host.");
+                ShowInfo(main.infoScreen, main, Entry, why);
                 main.screenSwitcher.SetActiveDisplay(main.infoScreen);
                 return;
             }
@@ -237,30 +238,79 @@ namespace Contracts.Mod.Kiosk
         }
     }
 
-    /// <summary>The Multiplayer mod's state, through its public API, if it is loaded.</summary>
+    /// <summary>
+    /// The Multiplayer mod's state, through its public API, if it is loaded.
+    ///
+    /// Its interfaces are in <c>MPAPI.Interfaces</c> (MultiplayerAPI 1.1.0, with Multiplayer
+    /// 0.1.16). Until 0.1.11 they were looked up in <c>MPAPI</c>, where they are not, so no game
+    /// was ever taken for a client's and no other player was ever seen: a player who joined ran
+    /// the contracts too, and the interchange offices' booklets came out for the host alone
+    /// (found 2026-11-10 against the installed mod; Blaze221, Nexus, 2026-11-08: "client cannot
+    /// see the jobs booklets at all"). Both places are tried, and a Multiplayer whose API can't
+    /// be read is <see cref="Role.Unknown"/>, on which the contracts stay off: a client running
+    /// them is worse than a host without them.
+    /// </summary>
     internal static class Multiplayer
     {
-        public static bool IsClient
+        internal enum Role
+        {
+            /// <summary>No Multiplayer mod, or it is not in a session.</summary>
+            None,
+            /// <summary>The host, or Multiplayer's own single-player session: the contracts run here.</summary>
+            Host,
+            /// <summary>A player who joined: the host runs the contracts.</summary>
+            Client,
+            /// <summary>Multiplayer is loaded, and its API can't be read.</summary>
+            Unknown,
+        }
+
+        /// <summary>An interface of the API, wherever this version keeps it.</summary>
+        private static Type Face(string name) =>
+            AccessTools.TypeByName("MPAPI.Interfaces." + name) ?? AccessTools.TypeByName("MPAPI." + name);
+
+        private static bool roleSaid;
+
+        public static Role Now
         {
             get
             {
                 try
                 {
                     var api = AccessTools.TypeByName("MPAPI.MultiplayerAPI");
-                    var face = AccessTools.TypeByName("MPAPI.IMultiplayerAPI");
-                    var instance = api?.GetProperty("Instance")?.GetValue(null);
-                    if (instance == null || face == null)
-                        return false;
-                    var connected = face.GetProperty("IsConnected")?.GetValue(instance) as bool? ?? false;
-                    var host = face.GetProperty("IsHost")?.GetValue(instance) as bool? ?? false;
-                    return connected && !host;
+                    if (api == null)
+                        return Role.None;
+                    var face = Face("IMultiplayerAPI");
+                    var connected = face?.GetProperty("IsConnected");
+                    var host = face?.GetProperty("IsHost");
+                    if (connected == null || host == null)
+                    {
+                        if (!roleSaid)
+                        {
+                            roleSaid = true;
+                            Main.Error("Multiplayer: its API has changed (IMultiplayerAPI.IsConnected and IsHost not found), so a host can't be told from a player who joined; contracts stay off with it loaded. Update Railroad Contracts");
+                        }
+                        return Role.Unknown;
+                    }
+                    var instance = api.GetProperty("Instance")?.GetValue(null);
+                    if (instance == null)
+                        return Role.None;
+                    if (!(connected.GetValue(instance) as bool? ?? false))
+                        return Role.None;
+                    return (host.GetValue(instance) as bool? ?? false) ? Role.Host : Role.Client;
                 }
-                catch (Exception)
+                catch (Exception e)
                 {
-                    return false;
+                    if (!roleSaid)
+                    {
+                        roleSaid = true;
+                        Main.Error($"Multiplayer: its API could not be read ({e.Message}); contracts stay off with it loaded");
+                    }
+                    return Role.Unknown;
                 }
             }
         }
+
+        public static bool IsClient => Now == Role.Client;
 
         private static bool positionsLooked, positionsFailed;
         private static PropertyInfo server, players, position, loaded;
@@ -279,10 +329,12 @@ namespace Contracts.Mod.Kiosk
                 {
                     positionsLooked = true;
                     server = AccessTools.TypeByName("MPAPI.MultiplayerAPI")?.GetProperty("Server", BindingFlags.Public | BindingFlags.Static);
-                    players = AccessTools.TypeByName("MPAPI.IServer")?.GetProperty("Players");
-                    var player = AccessTools.TypeByName("MPAPI.IPlayer");
+                    players = Face("IServer")?.GetProperty("Players");
+                    var player = Face("IPlayer");
                     position = player?.GetProperty("Position");
                     loaded = player?.GetProperty("IsLoaded");
+                    if (server != null && (players == null || position == null))
+                        Main.Warn("Multiplayer: its API has changed (IServer.Players or IPlayer.Position not found); booklets at the interchange offices come out for the host only");
                 }
                 var host = server?.GetValue(null);
                 if (host == null || players == null || position == null || !(players.GetValue(host) is IEnumerable all))
@@ -305,8 +357,10 @@ namespace Contracts.Mod.Kiosk
         public static string Describe()
         {
             var api = AccessTools.TypeByName("MPAPI.MultiplayerAPI");
-            var face = AccessTools.TypeByName("MPAPI.IMultiplayerAPI");
+            var face = Face("IMultiplayerAPI");
             var instance = api?.GetProperty("Instance")?.GetValue(null);
+            if (face == null && api != null)
+                return "loaded, its API not readable";
             if (instance == null || face == null)
                 return api == null ? "not loaded" : "loaded, no instance";
             return string.Join(", ", new[] { "IsConnected", "IsHost", "IsSinglePlayer" }

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0 (2026-11-11)
+
+- A career's first contract starts as you take it, and its first cars come right away. Later contracts still start at midnight. A contract given up before its first midnight costs nothing.
+- Cars come on the industry's request: each morning an industry orders its level's cars less those still in work, so cars you haven't moved yet aren't ordered again. An industry still waiting for its materials asks for less to ship.
+- An industry with more kinds of cargo than carloads a day takes them all in turn; before, the same ones were left out every day.
+- Ending a contract takes effect at midnight, and its penalty is charged then. Until midnight you can take it back with Keep level.
+- When an interchange has no free track for new cars, they wait and the service comes again every 2.5 hours. The kiosk's Waiting for room row counts them.
+- The bridge contract is offered once one of your contracts is at level 3. A bridge you already hold runs on.
+- The kiosk shows how far each contract is toward a raise (L1 2/3d, then the Raise row's 2/3 days or needs >90%), and tells you when a raise is refused at midnight. Penalties you owe have a row of their own. Taking a contract says what ending it can cost, and how to sleep through the wait for its cars: Sleep Cooldown at Can always sleep.
+- The comms radio's Clear no longer deletes a locomotive or coach you own; sell it at the kiosk. Selling your only locomotive warns you first.
+- When a contract ends, its cars still on interchange tracks with no job taken are picked up at the next service, so they don't block new cars.
+- In multiplayer, players who join can use the Contracts menu at any kiosk: take, raise, lower and end contracts, and buy and sell locomotives and coaches with the railroad's cash. The host still runs the contracts, and everyone needs the same version.
+- In multiplayer, a player who joins is now recognized as one: the contracts run on the host only, and the interchange offices' job booklets come out for any player standing there.
+- If Persistent Jobs changes in a way the mod can't work with, your contracts go on hold and the kiosk says so, with nothing scored or charged meanwhile. One car or track that goes wrong no longer stops the rest of the day's interchange service, and days the contracts were off for are not all scored at once.
+- Needs Interchange Yards 0.1.7.
+
 ## 0.1.11 (2026-11-09)
 
 - In multiplayer, stations no longer spawn locomotives, so a new career has only its one DE2.

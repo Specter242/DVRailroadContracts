@@ -23,6 +23,8 @@ namespace Contracts.Mod.Kiosk
         private sealed class Choice
         {
             public string Label, Value, Ask;
+            // For a row that can't be done: why, on the info line while the row is highlighted.
+            public string Hint;
             public Action Do;
             // An action whose result is a message for the player (a purchase), shown in full on the
             // kiosk's info screen; and a reason a row can't be done, too long for the info line.
@@ -76,12 +78,12 @@ namespace Contracts.Mod.Kiosk
             {
                 // Each vehicle the player bought, with the offer for it; the sale's result goes on the
                 // info screen. One that can't be sold now says why there.
-                foreach (var unit in Runtime.VehicleSales.Owned())
+                foreach (var row in desk.Selling())
                 {
-                    var u = unit;
+                    var u = row;
                     choices.Add(u.Blocker != null
                         ? new Choice { Label = u.Label, Value = $"${u.Offer:N0}", Explain = $"{u.Label} can't be sold now.\n\n{u.Blocker}" }
-                        : new Choice { Label = u.Label, Value = $"${u.Offer:N0}", Ask = Runtime.VehicleSales.Ask(u), Act = () => Runtime.VehicleSales.Sell(u) });
+                        : new Choice { Label = u.Label, Value = $"${u.Offer:N0}", Ask = u.Ask, Act = () => desk.Sell(u.Key) });
                 }
                 if (choices.Count == 0)
                     choices.Add(new Choice { Label = "Nothing to sell", Value = "", Ask = "Locomotives and coaches you buy here can be sold back." });
@@ -92,16 +94,18 @@ namespace Contracts.Mod.Kiosk
                 // A purchase's result, or why it can't be made, goes on the kiosk's info screen in
                 // full (a Discord report, 2026-11-03: the refusal ran past the info line's edge).
                 var place = list.Place;
-                foreach (var item in Runtime.LocoShop.Catalogue(kind))
+                var coaches = kind == Runtime.LocoShop.Kind.Coaches;
+                var money = desk.Money;
+                foreach (var row in desk.Shop(coaches, place))
                 {
-                    var it = item;
-                    choices.Add(Runtime.LocoShop.Money < it.Price
-                        ? new Choice { Label = it.Name, Value = $"${it.Price:N0}", Explain = Runtime.LocoShop.ShortOf(it) }
+                    var it = row;
+                    choices.Add(money < it.Price
+                        ? new Choice { Label = it.Name, Value = $"${it.Price:N0}", Explain = Contracts.Core.Shop.VehicleSale.ShortOf(it.Name, it.Price, money) }
                         : new Choice
                         {
                             Label = it.Name, Value = $"${it.Price:N0}",
-                            Ask = Runtime.LocoShop.AskToBuy(it, place),
-                            Act = () => Runtime.LocoShop.Buy(it, place),
+                            Ask = it.Ask,
+                            Act = () => desk.Buy(coaches, it.Key, place),
                         });
                 }
                 return;
@@ -120,10 +124,11 @@ namespace Contracts.Mod.Kiosk
                         : new Choice
                         {
                             Label = $"Take at level {l}", Value = desk.Volume(contract, l),
-                            Ask = $"Take {contract.Short} at level {l}? It starts at midnight. " +
-                                  (Runtime.RuntimeDesk.IsPassenger(contract.Id)
-                                      ? "From 06:00 the next morning its trains run to the timetable, with coaches you own."
-                                      : "From 06:00 the next morning its cars come and go through the interchanges, with their jobs."),
+                            // How to pass the wait (mikebackwards, Nexus, 2026-11-10: "Game says I'm not
+                            // tired enough ... need to wait 6 real time hours"): the game's Sleep Cooldown
+                            // setting, which the mod's page hadn't named.
+                            // And what backing out costs, before it is taken (the End row said it only after).
+                            Ask = Contracts.Core.Industries.ContractTerms.TakeQuestion(contract.Short, l, Runtime.RuntimeDesk.IsPassenger(contract.Id), desk.StartsAtOnce),
                             Do = () => desk.Take(contract, l),
                         });
                 }
@@ -148,6 +153,24 @@ namespace Contracts.Mod.Kiosk
                     Ask = desk.Legend(contract),
                 });
             var asked = contract.RequestedLevel;
+            // Asked to end: it ends at midnight, and until then keeping its level takes that back.
+            if (contract.Ending)
+            {
+                var due = desk.Penalty(contract, 0);
+                choices.Add(new Choice
+                {
+                    Label = "Ends at midnight", Value = due > 0.0 ? $"-${due:N0}" : "",
+                    Ask = due > 0.0 ? $"Ends at midnight: -${due:N0} at most" : "Ends at midnight",
+                });
+                choices.Add(new Choice
+                {
+                    Label = $"Keep level {contract.Level}", Value = "",
+                    Ask = $"Keep {contract.Short} at level {contract.Level}? It won't end at midnight.",
+                    Do = () => desk.RequestLevel(contract, contract.Level),
+                });
+                AddBonus(contract);
+                return;
+            }
             // A raise is one level from the current one, with the standing for it (owner,
             // 2026-11-02: "gate upgrading contracts to performance, consistent performance").
             if (asked < 5 && asked == contract.Level && contract.Level >= 1)
@@ -160,7 +183,8 @@ namespace Contracts.Mod.Kiosk
                         Ask = $"Raise {contract.Short} to level {asked + 1} from midnight?",
                         Do = () => desk.RequestLevel(contract, asked + 1),
                     }
-                    : new Choice { Label = $"Raise to level {asked + 1}", Value = "locked", Ask = blocker });
+                    // Not yet: the row says how far it is, and the info line why while it is highlighted.
+                    : new Choice { Label = $"Raise to level {asked + 1}", Value = desk.RaiseValue(contract) ?? "locked", Ask = blocker, Hint = blocker });
             }
             // Lowering costs the penalty at midnight; a day more of history by then can only make it less.
             if (asked > 1)
@@ -180,14 +204,23 @@ namespace Contracts.Mod.Kiosk
                     Ask = $"Keep {contract.Short} at level {contract.Level}?",
                     Do = () => desk.RequestLevel(contract, contract.Level),
                 });
+            // Ending is final at midnight, with its penalty then (a day more of history by then can
+            // only make it less); a contract not yet started is given up at once, free.
             var ending = desk.Penalty(contract, 0);
             choices.Add(new Choice
             {
                 Label = "End contract", Value = ending > 0.0 ? $"-${ending:N0}" : "",
-                Ask = $"End {contract.Short} now?" + (ending > 0.0 ? $" Penalty ${ending:N0}." : ""),
+                Ask = contract.Level < 1 ? $"Give up {contract.Short} now? It hasn't started, so it costs nothing."
+                    : $"End {contract.Short} at midnight?" + (ending > 0.0 ? $" Penalty up to ${ending:N0}, charged then." : " It costs nothing before its first midnight.")
+                      + " Until then you can keep it.",
                 Do = () => desk.End(contract),
             });
-            // The quick-delivery bonus at its level, for reading (D7).
+            AddBonus(contract);
+        }
+
+        /// <summary>The quick-delivery bonus at the contract's level, for reading (D7).</summary>
+        private void AddBonus(ContractView contract)
+        {
             var bonus = Contracts.Core.Industries.ContractTerms.BonusPercent(contract.Level);
             choices.Add(new Choice
             {
@@ -207,17 +240,19 @@ namespace Contracts.Mod.Kiosk
             if (contract != null && contract.Id == Runtime.RuntimeDesk.SellId)
             {
                 lines.Title.text = "Sell vehicles";
-                lines.Info.text = $"Cash ${Runtime.LocoShop.Money:N0}";
+                restInfo = $"Cash ${KioskMenu.Desk?.Money ?? 0.0:N0}";
+                ShowInfoLine();
                 return;
             }
             if (contract != null && Runtime.RuntimeDesk.ShopOf(contract.Id) is Runtime.LocoShop.Kind shop)
             {
                 lines.Title.text = shop == Runtime.LocoShop.Kind.Coaches ? "Coaches" : "Locomotives";
-                lines.Info.text = $"Cash ${Runtime.LocoShop.Money:N0}";
+                restInfo = $"Cash ${KioskMenu.Desk?.Money ?? 0.0:N0}";
+                ShowInfoLine();
                 return;
             }
             lines.Title.text = contract == null ? "" : contract.IsOffer ? contract.Short : $"{contract.Short}  {ContractsScreen.Standing(contract)}";
-            lines.Info.text = contract == null || KioskMenu.Desk == null ? ""
+            restInfo = contract == null || KioskMenu.Desk == null ? ""
                 : contract.Needs != null ? contract.Needs
                 : contract.IsOffer ? KioskMenu.Desk.Legend(contract)
                 // Not started yet: when its cars come (a contract's work starts at the first service after its first midnight).
@@ -225,6 +260,17 @@ namespace Contracts.Mod.Kiosk
                 : Runtime.RuntimeDesk.IsPassenger(contract.Id) ? $"{KioskMenu.Desk.Volume(contract, contract.RequestedLevel)} a day, {contract.OpenWaybills} open"
                 // Its cars still to move, as they are now (the Cars row has the page of them).
                 : cars?.Line ?? "";
+            ShowInfoLine();
+        }
+
+        // The info line with no row's reason on it.
+        private string restInfo = "";
+
+        /// <summary>The info line: the highlighted row's reason if it has one, else the screen's own line.</summary>
+        private void ShowInfoLine()
+        {
+            var at = IndexOfFirstDisplayedEntry + selector.Current;
+            lines.Info.text = (selector.HasElements && at >= 0 && at < choices.Count ? choices[at].Hint : null) ?? restInfo;
         }
 
         public override void Disable()
@@ -240,9 +286,11 @@ namespace Contracts.Mod.Kiosk
             {
                 case InputAction.Up when selector.HasElements:
                     ScrollUp();
+                    ShowInfoLine();
                     break;
                 case InputAction.Down when selector.HasElements:
                     ScrollDown();
+                    ShowInfoLine();
                     break;
                 case InputAction.Cancel:
                     kiosk.SetActiveDisplay(list);
@@ -275,6 +323,9 @@ namespace Contracts.Mod.Kiosk
                         if (choice.Act != null)
                         {
                             KioskMenu.ShowInfo(info, this, choice.Label, choice.Act());
+                            // At the kiosk of a player who joined, the host's answer replaces this page when it comes.
+                            if (DeskNet.Remote.Active)
+                                DeskNet.Remote.Awaiting(kiosk, info, this, choice.Label);
                             confirm.OverrideReturnScreen(info);
                         }
                         else

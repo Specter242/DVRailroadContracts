@@ -119,6 +119,13 @@ namespace Contracts.Core.Industries
     /// Only cargo the railroad may carry is billed (<c>carries</c>; design D19: the player's
     /// licenses). A line with none of it is not due today; a load of it standing idle goes off
     /// the map.
+    ///
+    /// **Cars come on the industry's request** (owner, 2026-11-10; <see cref="Requests"/>). An
+    /// industry asks each day for its level's carloads less its cars still in work
+    /// (<see cref="WorkInHand"/>), so yesterday's cars not yet dealt with are not ordered again,
+    /// and one that is behind with its materials asks for that much less to ship. Until then
+    /// every day ordered the level's full carloads, whatever stood unmoved. A bridge asks the
+    /// same way, each way.
     /// </summary>
     public static class IndustryPlanner
     {
@@ -137,8 +144,42 @@ namespace Contracts.Core.Industries
             public Industry Receiver;
         }
 
+        /// <summary>
+        /// What an industry asks for today at its level, by role: its level's carloads less its
+        /// cars of that role still in work. What it ships (products and waste) is further held to
+        /// the share of a day's materials it is not waiting for: with half a day's materials
+        /// still to come it ships half, with a whole day's none. An industry that takes no
+        /// materials ships on its own.
+        /// </summary>
+        public static Dictionary<LineRole, int> Requests(Industry industry, int level, WorkInHand inHand)
+        {
+            if (industry == null) throw new ArgumentNullException(nameof(industry));
+            var asks = new Dictionary<LineRole, int>();
+            var materials = industry.Daily(LineRole.Material, level);
+            var behind = inHand?.Of(industry.Id, LineRole.Material) ?? 0;
+            var supplied = materials > 0 ? 1.0 - Math.Min(1.0, behind / (double)materials) : 1.0;
+            foreach (LineRole role in Enum.GetValues(typeof(LineRole)))
+            {
+                var daily = industry.Daily(role, level);
+                var ask = Math.Max(0, daily - (inHand?.Of(industry.Id, role) ?? 0));
+                if (role != LineRole.Material && supplied < 1.0)
+                    ask = Math.Min(ask, (int)Math.Floor(daily * supplied + 1e-9));
+                asks[role] = ask;
+            }
+            return asks;
+        }
+
+        /// <summary>A bridge's loads to ask for toward an interchange today: its level's less those still in work that way.</summary>
+        public static int BridgeRequest(Bridge bridge, int level, string toInterchange, WorkInHand inHand)
+        {
+            if (bridge == null) throw new ArgumentNullException(nameof(bridge));
+            return Math.Max(0, IndustrySettings.DailyCarloads(bridge.Level5Carloads, level) - (inHand?.OfBridge(bridge.Id, toInterchange) ?? 0));
+        }
+
+        /// <param name="inHand">The contracts' cars still in work; null plans every contract's full day.</param>
+        /// <param name="day">The contract day, which passes the turn among a role's lines (Industry.Share).</param>
         public static DayPlan PlanDay(IndustryData data, IReadOnlyDictionary<string, int> levels, IReadOnlyList<FleetCar> fleet,
-            SplitMix64 rng, Func<string, bool> carries = null)
+            SplitMix64 rng, Func<string, bool> carries = null, WorkInHand inHand = null, int day = 0)
         {
             if (data == null) throw new ArgumentNullException(nameof(data));
             if (rng == null) throw new ArgumentNullException(nameof(rng));
@@ -155,11 +196,12 @@ namespace Contracts.Core.Industries
             var demand = new List<Need>();
             foreach (var industry in active)
             {
-                var day = plan.Industries[industry.Id] = new IndustryDay();
+                var today = plan.Industries[industry.Id] = new IndustryDay();
+                var asks = Requests(industry, LevelOf(industry.Id), inHand);
                 foreach (LineRole role in Enum.GetValues(typeof(LineRole)))
                 {
-                    var split = industry.Split(role, LevelOf(industry.Id)).Where(s => CargoOf(s.Line).Count > 0).ToList();
-                    day.Due[role] = split.Sum(s => s.Carloads);
+                    var split = industry.Share(role, asks[role], day).Where(s => CargoOf(s.Line).Count > 0).ToList();
+                    today.Due[role] = split.Sum(s => s.Carloads);
                     foreach (var (line, carloads) in split.Where(s => s.Carloads > 0))
                         (line.Ships ? supply : demand).Add(new Need { Industry = industry, Line = line, Left = carloads });
                 }
@@ -323,10 +365,11 @@ namespace Contracts.Core.Industries
                 var level = LevelOf(b.Id);
                 var cargo = b.Cargo.Where(Carried).ToList();
                 if (level < 1 || cargo.Count == 0) continue;
-                var due = IndustrySettings.DailyCarloads(b.Level5Carloads, level);
-                plan.Bridges[b.Id] = 2 * due;
+                plan.Bridges[b.Id] = 0;
                 foreach (var (from, to) in new[] { (b.From, b.To), (b.To, b.From) })
                 {
+                    var due = BridgeRequest(b, level, to, inHand);
+                    plan.Bridges[b.Id] += due;
                     var byCargo = new Dictionary<string, int>();
                     for (var i = 0; i < due; i++)
                     {

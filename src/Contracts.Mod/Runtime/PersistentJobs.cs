@@ -46,6 +46,29 @@ namespace Contracts.Mod.Runtime
                 Main.Error("Persistent Jobs: not found: " + string.Join(", ", Missing));
         }
 
+        /// <summary>
+        /// What the runtime can't find of Persistent Jobs, looked up now: without any of these it
+        /// can't keep stations from spawning or write a job, and the contracts go on hold
+        /// (ContractRuntime.OnHold). Empty when all is found.
+        /// </summary>
+        public static IReadOnlyList<string> CheckCritical()
+        {
+            Look();
+            return Missing;
+        }
+
+        /// <summary>Whether Persistent Jobs' far-car suspension, if it has one, can be kept off contract cars (FarCarGuard); the name of what is missing, or null.</summary>
+        public static string CheckFarCars()
+        {
+            var type = FarCars;
+            if (type == null)
+                return null;
+            foreach (var name in new[] { "IsTrainsetValid", "SuspendCars", "SuspendCar" })
+                if (AccessTools.Method(type, name) == null)
+                    return name;
+            return null;
+        }
+
         private static MethodInfo Method(string type, string name)
         {
             var t = AccessTools.TypeByName(type);

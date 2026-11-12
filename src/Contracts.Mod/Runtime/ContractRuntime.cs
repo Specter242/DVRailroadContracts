@@ -69,18 +69,26 @@ namespace Contracts.Mod.Runtime
         {
             try
             {
-                if (Kiosk.Multiplayer.IsClient)
+                var role = Kiosk.Multiplayer.Now;
+                if (role == Kiosk.Multiplayer.Role.Client)
                 {
                     Main.Log("contracts: a Multiplayer client; the host runs the contracts");
                     return;
                 }
+                if (role == Kiosk.Multiplayer.Role.Unknown)
+                {
+                    Main.Error("contracts: Multiplayer is loaded and its API can't be read; contracts stay off, so a player who joined doesn't run them too");
+                    return;
+                }
+                Main.Log($"contracts: Multiplayer: {Kiosk.Multiplayer.Describe()}");
                 var state = ContractState.Read(ContractState.CurrentSave, out var unreadable);
                 if (unreadable)
                     return;
                 var go = new GameObject("[contracts runtime]");
                 var rt = go.AddComponent<ContractRuntime>();
                 rt.State = state ?? new ContractState();
-                rt.newCareer = state == null && IsNewCareer();
+                // A new career, or one whose starter could not be delivered at its first load.
+                rt.newCareer = state == null ? IsNewCareer() : state.StarterDue && !state.StarterGiven;
                 Instance = rt;
                 CareerRules.IsContractCar = g => g != null && Instance != null && Instance.State.Of(g) != null;
                 var save = SingletonBehaviour<SaveGameManager>.Instance;
@@ -186,9 +194,14 @@ namespace Contracts.Mod.Runtime
                 Notes.Add($"setup: {flagged} station(s) flagged as spawned");
                 Economy = Economy.Build(Notes);
                 if (newCareer && !State.StarterGiven)
+                {
                     State.StarterGiven = CareerRules.GiveStarter(Notes);
+                    State.StarterDue = !State.StarterGiven;
+                }
+                CheckBindings();
                 LicenseRules.GiveJobTypes(Notes);
                 LicenseRules.LicenseOwned(SingletonBehaviour<TrainCarRegistry>.Instance?.logicCarToTrainCar.Values, Notes);
+                Notes.Add($"setup: {VehicleSales.Protect()} owned vehicle(s) kept from the comms radio's Clear");
                 var withdrawn = WithdrawUncarried(LicenseRules.Carrying());
                 if (withdrawn > 0)
                     Notes.Add($"licenses: {withdrawn} bill(s) for cargo without its licenses withdrawn");
@@ -204,32 +217,159 @@ namespace Contracts.Mod.Runtime
             if (now == null)
                 return;
             var day = DayOf(now.Value);
-            if (State.Day < 0)
-                State.Day = day;
-            while (State.Day < day)
+            // Each part on its own: one that fails says so and the others still run (a fault in the
+            // industries' work used to stop the cars being spotted and the passenger trains too).
+            Part("the day's roll", () =>
             {
-                State.Day++;
-                Midnight();
-            }
-            if (now.Value.Hour >= 6 && State.ServiceDay < day)
+                if (Settled(day))
+                    RollTo(day);
+            });
+            Part("what is owed", () => ContractPay.Collect(State));
+            // On hold: the clock keeps the day, and nothing else moves (CheckBindings).
+            if (OnHold != null)
+                return;
+            Part("the interchange service", () =>
             {
-                State.ServiceDay = day;
-                BeginService(day);
-            }
-            ContractPay.Collect(State);
-            WorkIndustries(Clock ?? 0.0);
+                if (now.Value.Hour >= 6 && State.ServiceDay < day)
+                {
+                    // The day is the service's whether it comes through or not: a day planned twice doubles its cars.
+                    State.ServiceDay = day;
+                    BeginService(day);
+                }
+                // The service again, for the cars it had no room for (Contracts.Core ServiceRetry).
+                else if (ServiceRetry.Due(State.Waiting.Sum(w => w.Count), State.RetryAt, Clock))
+                    BeginRetry();
+            });
+            Part("the industries' work", () => WorkIndustries(Clock ?? 0.0));
             spotTimer -= 2f;
             if (spotTimer <= 0f)
             {
                 spotTimer = 15f;
-                SpotWaiting();
+                Part("spotting the cars that wait", SpotWaiting);
             }
             passengerTimer -= 2f;
             if (passengerTimer <= 0f)
             {
                 passengerTimer = 10f;
-                PassengerRuns.Run(State);
+                Part("the passenger trains", () => PassengerRuns.Run(State));
             }
+        }
+
+        // The world's day as last read, and for how many ticks running.
+        private int dayRead = int.MinValue, dayReadTicks;
+
+        /// <summary>
+        /// Whether the world's day can be acted on: the contract day or the next at once; any
+        /// other (days skipped, or the clock set back) only once it has read the same for ten
+        /// seconds, so a date the game shows for a moment while it sets up is not taken for a
+        /// jump, which can't be undone.
+        /// </summary>
+        private bool Settled(int day)
+        {
+            if (State.Day < 0 || day == State.Day || day == State.Day + 1)
+            {
+                dayRead = day;
+                dayReadTicks = 0;
+                return true;
+            }
+            dayReadTicks = day == dayRead ? dayReadTicks + 1 : 1;
+            dayRead = day;
+            return dayReadTicks >= 5;
+        }
+
+        // A part of the tick that failed, said once a minute at most.
+        private readonly Dictionary<string, float> partFailed = new Dictionary<string, float>(StringComparer.Ordinal);
+
+        private void Part(string what, Action part)
+        {
+            try
+            {
+                part();
+            }
+            catch (Exception e)
+            {
+                var at = Time.unscaledTime;
+                if (partFailed.TryGetValue(what, out var last) && at - last < 60f)
+                    return;
+                partFailed[what] = at;
+                Main.Error($"contracts: {what} failed; the rest goes on: {e}");
+            }
+        }
+
+        /// <summary>
+        /// Why the contracts are on hold, or null. Without Persistent Jobs' job generators and
+        /// spawn flags no job can be written, and bills that can't be moved used to age into
+        /// penalties with nothing said but a line in the log. On hold no service comes, nothing is
+        /// scored or charged, the open bills keep their ages (<see cref="RollTo"/>), and the kiosk
+        /// says why.
+        /// </summary>
+        public string OnHold { get; internal set; }
+
+        private void CheckBindings()
+        {
+            var missing = PersistentJobs.CheckCritical();
+            if (missing.Count > 0)
+            {
+                OnHold = "Persistent Jobs has changed: " + string.Join(", ", missing) + " not found";
+                Main.Error($"contracts: on hold: {OnHold}. No cars come and nothing is scored or charged until Railroad Contracts is updated for this Persistent Jobs (or Persistent Jobs 4.0 is put back)");
+            }
+            var far = PersistentJobs.CheckFarCars();
+            if (far != null)
+                Main.Warn($"contracts: Persistent Jobs' far-car suspension has changed ({far} not found), so contract cars far from the player are not kept out of it; their bills are kept while they are away");
+            Notes.Add(OnHold == null ? "setup: Persistent Jobs' generators and flags found" : "setup: ON HOLD: " + OnHold);
+        }
+
+        /// <summary>
+        /// Brings the contract day to the world's (Contracts.Core DayRoll): a day on, its midnight;
+        /// several at once, the days between skipped unscored with the open bills moved on by
+        /// them; the clock set back, the bills moved back with it. On hold a midnight scores
+        /// nothing and moves the bills on a day.
+        /// </summary>
+        internal void RollTo(int day)
+        {
+            if (State.Day < 0)
+                State.Day = day;
+            var (skipped, back) = DayRoll.Plan(State.Day, day);
+            if (back > 0)
+            {
+                Main.Warn($"contracts: the world's clock went back {back} day(s) (day {State.Day} to {day}); the contracts follow it, their open bills keeping their ages");
+                MoveBills(-back);
+                // No service on account of the clock: with 06:00 past, today has had its own as far
+                // as anyone can tell, and the next is tomorrow's; before 06:00 it comes at 06:00.
+                State.ServiceDay = (Now?.Hour ?? 6) >= 6 ? day : day - 1;
+                State.Day = day;
+                return;
+            }
+            if (skipped > 0)
+            {
+                Main.Warn($"contracts: {skipped} day(s) went by with the contracts off (day {State.Day} to {day}); they are not scored, and the open bills are moved on by them");
+                MoveBills(skipped);
+                State.Day += skipped;
+            }
+            while (State.Day < day)
+            {
+                State.Day++;
+                if (OnHold != null)
+                    MoveBills(1);
+                else
+                    Midnight();
+            }
+        }
+
+        /// <summary>Moves every time the standing is reckoned from by whole days: the open bills, the day each contract was taken, the passenger trains due and running, and the next retry.</summary>
+        private void MoveBills(int days)
+        {
+            foreach (var w in State.Waybills)
+                w.Opened = DayRoll.Moved(w.Opened, days);
+            foreach (var c in State.Contracts)
+            {
+                c.SinceDay += days;
+                for (var i = 0; i < c.Due.Count; i++)
+                    c.Due[i] += days;
+                foreach (var r in c.Running)
+                    r.Opened += days;
+            }
+            State.RetryAt = DayRoll.Moved(State.RetryAt, days);
         }
 
         /// <summary>
@@ -256,35 +396,33 @@ namespace Contracts.Mod.Runtime
                          $"{ContractStanding.Average(c.History) * 100:0}% over {c.History.Count} day(s)");
             }
             var changes = new List<string>();
+            var refused = new List<string>();
             var charged = 0.0;
             foreach (var c in State.Contracts.ToList())
             {
-                var target = c.Requested >= 1 ? c.Requested : c.Level;
-                // Three poor days take a contract down two levels (D7, Contracts.Core ContractTerms).
-                var reason = "";
-                var forced = ContractTerms.ForcedLevel(c.Level, c.History);
-                if (forced.HasValue && target > forced.Value)
+                // Midnight makes every change final, and only midnight charges for one (Contracts.Core
+                // ContractTerms.AtMidnight; owner, 2026-11-10): the level asked for, the end asked
+                // for, or the two levels down that three poor days force (D7).
+                var change = ContractTerms.AtMidnight(c.Level, c.Requested, c.Ending, c.History);
+                var target = change.Target;
+                var reason = change.Forced ? " (low performance)" : "";
+                var asked = c.Ending;
+                c.Ending = false;
+                // A raise asked for and not given: the kiosk says so, with the drops (captain75tur, Nexus,
+                // 2026-11-10; until 0.1.11 only the log did, and the list went from "L1>2" back to "L1").
+                if (change.RaiseRefused != null)
                 {
-                    target = forced.Value;
-                    reason = " (low performance)";
+                    Main.Log($"contracts: {c.Id} stays at level {c.Level}, not raised: {change.RaiseRefused}");
+                    refused.Add(ContractStanding.RaiseRefused(c.Id, c.Level, c.History));
                 }
                 if (target == c.Level)
                 {
                     c.Requested = c.Level;
                     continue;
                 }
-                if (c.Level >= 1 && target > c.Level)
-                {
-                    var blocker = ContractStanding.RaiseBlocker(c.Level, c.History);
-                    if (blocker != null)
-                    {
-                        Main.Log($"contracts: {c.Id} stays at level {c.Level}, not raised: {blocker}");
-                        c.Requested = c.Level;
-                        continue;
-                    }
-                    target = c.Level + 1;
-                }
-                var penalty = ContractTerms.Penalty(c.Level, target, c.History.Count);
+                // Given up before its first midnight (asked to end the day it was taken), it costs nothing.
+                var free = asked && target < 1 && ContractTerms.FreeToGiveUp(c.SinceDay, State.Day - 1);
+                var penalty = free ? 0.0 : ContractTerms.Penalty(c.Level, target, c.History.Count);
                 if (penalty > 0.0)
                 {
                     ContractPay.Charge(State, penalty, $"{c.Id} from level {c.Level} to {target}{reason}");
@@ -293,7 +431,9 @@ namespace Contracts.Mod.Runtime
                 if (target < 1)
                 {
                     State.Contracts.Remove(c);
-                    Main.Log($"contracts: {c.Id} ended at midnight{reason}; its cars finish their legs and drain");
+                    var setOut = SetOutEnded(c.Id);
+                    Main.Log($"contracts: {c.Id} ended at midnight{reason}{(free ? ", free on its first day" : "")}; " +
+                             $"{setOut} of its car(s) on interchange tracks set out for pickup, the rest finish their legs and drain");
                     changes.Add($"{c.Id} ended");
                     continue;
                 }
@@ -304,14 +444,64 @@ namespace Contracts.Mod.Runtime
                 c.History.Clear();
                 c.Closed.Clear();
             }
-            // The kiosk says what dropped, the next time its Contracts list opens, on its one line:
-            // by name if that fits, else how many.
-            if (changes.Count > 0)
+            // The kiosk says what dropped and what was not raised, the next time its Contracts list
+            // opens, on its one line: by name if that fits, else how many.
+            if (ContractTerms.MidnightNotice(changes, charged, refused, Kiosk.KioskMenu.InfoLineChars) is string notice)
+                Kiosk.KioskMenu.Tell(notice);
+        }
+
+        /// <summary>
+        /// An ended contract's cars standing on interchange tracks with no job taken: nobody will
+        /// move them now, and they kept the track from new cuts (a cut goes only on a track with no
+        /// car on it). Their jobs are withdrawn and they are set out for the pickup; the next
+        /// service, or its retry, takes them away. A job the player has taken finishes, and a job
+        /// shared with another contract's cars stays. Returns how many were set out.
+        /// </summary>
+        private int SetOutEnded(string contract)
+        {
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            if (registry == null || jobs == null)
+                return 0;
+            var n = 0;
+            var withdrawn = new HashSet<Job>();
+            foreach (var w in State.Waybills.Where(w => w.Contract == contract && w.Stage != Stage.OffMap).ToList())
             {
-                var cost = charged > 0.0 ? $": -${charged:N0}" : "";
-                var named = string.Join(", ", changes) + cost;
-                Kiosk.KioskMenu.Tell(named.Length <= Kiosk.KioskMenu.InfoLineChars ? named : $"{changes.Count} contracts dropped{cost}");
+                var car = registry.GetTrainCarByCarGuid(w.Guid);
+                if (car == null || car.logicCar == null || !InterchangeYards.IsInterchangeTrack(car.logicCar.FrontBogieTrack))
+                    continue;
+                var job = jobs.GetJobOfCar(car.logicCar);
+                if (job != null)
+                {
+                    if (job.State != JobState.Available)
+                        continue;
+                    if (!withdrawn.Contains(job) && CarsOf(job.tasks).Any(c => State.Of(c?.carGuid)?.Contract != contract))
+                        continue;
+                    if (withdrawn.Add(job))
+                        Withdraw(job);
+                }
+                w.Opened = null;
+                w.Stage = Stage.OffMap;
+                w.At = PlaceOf(car, w);
+                n++;
             }
+            return n;
+        }
+
+        /// <summary>
+        /// A career's first contract starts at once (RuntimeDesk.StartsAtOnce): the service comes
+        /// now for it, as the day's own. A day whose 06:00 has not come yet gets no second service;
+        /// the next is tomorrow's.
+        /// </summary>
+        internal void OpenFirstContract()
+        {
+            var now = Now;
+            if (now == null)
+                return;
+            var day = DayOf(now.Value);
+            State.ServiceDay = day;
+            if (BeginService(day))
+                Main.Log($"contracts: the service comes now for the career's first contract (day {day})");
         }
 
         /// <summary>Whether a car's bill counts for a contract: the one it is billed to, or the industry it goes to.</summary>
@@ -359,6 +549,12 @@ namespace Contracts.Mod.Runtime
         internal sealed class ServiceRun
         {
             public int Day, Contracts, Taken, Gone, Asleep, Idled, Recalled, Withdrawn, Bills, SetOut, Placed, Made;
+            /// <summary>Cars, cuts or jobs the service could not deal with (each said in the log); the rest went on.</summary>
+            public int Failed;
+            /// <summary>The service come again for the cars it had no room for, not a day's own.</summary>
+            public bool Retry;
+            /// <summary>What each contract asked for this day against its level's full day, in carloads (a line the player may not carry asks none).</summary>
+            public readonly Dictionary<string, (int Asked, int Daily)> Requests = new Dictionary<string, (int, int)>(StringComparer.Ordinal);
             public double? Opened;
             public readonly StagedWork Work = new StagedWork();
             public double WorkMs, LongestStepMs;
@@ -427,60 +623,70 @@ namespace Contracts.Mod.Runtime
             var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
             var jobs = SingletonBehaviour<JobsManager>.Instance;
             var carrying = LicenseRules.Carrying();
+            // The day is planned afresh: the cars the last service still had no room for are dropped.
+            var dropped = ServiceRetry.Cars(State.Waiting.Select(w => w.Order()));
+            if (dropped > 0)
+                Main.Log($"contracts: {dropped} car(s) of the last service never found room on an interchange; dropped for the new day's orders");
+            State.Waiting.Clear();
+            State.RetryAt = null;
             var run = new ServiceRun { Day = day, Opened = Clock, Withdrawn = WithdrawUncarried(carrying) };
             foreach (var w in State.Waybills.ToList())
             {
-                var car = registry?.GetTrainCarByCarGuid(w.Guid);
-                // Held by Persistent Jobs' far-car suspension: out of the world for now, not gone.
-                if (car == null && PersistentJobs.IsSuspended(w.Guid))
+                // A car at a time: one whose record or car throws is left for the next service, and the rest go on.
+                try
                 {
-                    run.Asleep++;
-                    continue;
-                }
-                if (car == null)
-                {
-                    State.Remove(w.Guid);
-                    run.Gone++;
-                    continue;
-                }
-                var track = car.logicCar.FrontBogieTrack;
-                if (w.Stage == Stage.OffMap || w.Stage == Stage.ToInterchange && jobs?.GetJobOfCar(car.logicCar) == null && InterchangeYards.IsInterchangeTrack(track))
-                {
-                    if (InterchangeYards.IsInterchangeTrack(track))
+                    var car = registry?.GetTrainCarByCarGuid(w.Guid);
+                    // Held by Persistent Jobs' far-car suspension: out of the world for now, not gone.
+                    if (car == null && PersistentJobs.IsSuspended(w.Guid))
                     {
-                        removing.Add(w.Guid);
-                        SingletonBehaviour<CarSpawner>.Instance.DeleteCar(car);
+                        run.Asleep++;
+                        continue;
+                    }
+                    if (car == null)
+                    {
                         State.Remove(w.Guid);
+                        run.Gone++;
+                        continue;
+                    }
+                    var track = car.logicCar.FrontBogieTrack;
+                    if (LeavesTheMap(w, car, jobs))
+                    {
+                        TakeAway(w, car);
                         run.Taken++;
                         continue;
                     }
+                    // Set out for pickup, then moved off the interchange (the player took it): nothing
+                    // collects it there, so it goes back to idle and the planner bills it again (owner,
+                    // 2026-11-03: "fix it"). Before, it waited off the map's edge for good.
+                    if (w.Stage == Stage.OffMap && jobs?.GetJobOfCar(car.logicCar) == null)
+                    {
+                        Main.Log($"contracts: {car.ID} was set out for pickup but stands on {track?.ID?.FullDisplayID ?? "no track"}: back to idle");
+                        w.Stage = Stage.Idle;
+                        w.At = PlaceOf(car, w);
+                        run.Recalled++;
+                    }
+                    // At an industry: worked on its track, or waiting for room there. Moved off before it
+                    // was done, the industry can't work it: back to idle, and the planner bills it again.
+                    if (Worked(w) && !OnIndustryTrack(car, w))
+                        Main.Log($"contracts: {car.ID} was moved off its industry track at {w.Next} before it was done: back to idle");
+                    var waits = Worked(w) ? OnIndustryTrack(car, w) : WaitsToSpot(car, w);
+                    if (w.Stage != Stage.Idle && w.Stage != Stage.OffMap && jobs?.GetJobOfCar(car.logicCar) == null && !waits)
+                    {
+                        w.Stage = Stage.Idle;
+                        w.Spotted = w.Ready = null;
+                        w.At = PlaceOf(car, w);
+                        run.Idled++;
+                    }
+                    if (w.Stage == Stage.Idle)
+                    {
+                        w.Cargo = car.logicCar.CurrentCargoTypeInCar == CargoType.None ? null : car.logicCar.CurrentCargoTypeInCar.ToString();
+                        w.At = PlaceOf(car, w);
+                    }
                 }
-                // Set out for pickup, then moved off the interchange (the player took it): nothing
-                // collects it there, so it goes back to idle and the planner bills it again (owner,
-                // 2026-11-03: "fix it"). Before, it waited off the map's edge for good.
-                if (w.Stage == Stage.OffMap && jobs?.GetJobOfCar(car.logicCar) == null)
+                catch (Exception e)
                 {
-                    Main.Log($"contracts: {car.ID} was set out for pickup but stands on {track?.ID?.FullDisplayID ?? "no track"}: back to idle");
-                    w.Stage = Stage.Idle;
-                    w.At = PlaceOf(car, w);
-                    run.Recalled++;
-                }
-                // At an industry: worked on its track, or waiting for room there. Moved off before it
-                // was done, the industry can't work it: back to idle, and the planner bills it again.
-                if (Worked(w) && !OnIndustryTrack(car, w))
-                    Main.Log($"contracts: {car.ID} was moved off its industry track at {w.Next} before it was done: back to idle");
-                var waits = Worked(w) ? OnIndustryTrack(car, w) : WaitsToSpot(car, w);
-                if (w.Stage != Stage.Idle && w.Stage != Stage.OffMap && jobs?.GetJobOfCar(car.logicCar) == null && !waits)
-                {
-                    w.Stage = Stage.Idle;
-                    w.Spotted = w.Ready = null;
-                    w.At = PlaceOf(car, w);
-                    run.Idled++;
-                }
-                if (w.Stage == Stage.Idle)
-                {
-                    w.Cargo = car.logicCar.CurrentCargoTypeInCar == CargoType.None ? null : car.logicCar.CurrentCargoTypeInCar.ToString();
-                    w.At = PlaceOf(car, w);
+                    run.Failed++;
+                    Main.Error($"contracts: the service could not deal with car {w.Guid}; it is left as it is: {e}");
                 }
             }
 
@@ -495,8 +701,25 @@ namespace Contracts.Mod.Runtime
                 Cargo = w.Cargo,
                 Busy = w.Stage != Stage.Idle,
             }).Where(f => f.CarType != null).ToList();
-            var plan = IndustryPlanner.PlanDay(Economy.Data, levels, fleet, new SplitMix64(State.Seed + (ulong)day), carrying);
+            // Cars come on each industry's request: its level's carloads less its cars still in work
+            // (owner, 2026-11-10; Contracts.Core WorkInHand, IndustryPlanner.Requests).
+            var inHand = InHand();
+            var plan = IndustryPlanner.PlanDay(Economy.Data, levels, fleet, new SplitMix64(State.Seed + (ulong)day), carrying, inHand, day);
             run.Bills = plan.Assignments.Count;
+            foreach (var kv in levels)
+            {
+                var industry = Economy.Industries.TryGetValue(kv.Key, out var found) ? found : null;
+                var bridge = industry == null ? Economy.Data.Bridges.FirstOrDefault(b => b.Id == kv.Key) : null;
+                var daily = industry != null ? Enum.GetValues(typeof(LineRole)).Cast<LineRole>().Sum(r => industry.Daily(r, kv.Value))
+                    : bridge != null ? 2 * IndustrySettings.DailyCarloads(bridge.Level5Carloads, kv.Value) : 0;
+                var asked = industry != null ? (plan.Industries.TryGetValue(kv.Key, out var its) ? its.Due.Values.Sum() : 0)
+                    : plan.Bridges.TryGetValue(kv.Key, out var loads) ? loads : 0;
+                run.Requests[kv.Key] = (asked, daily);
+            }
+            var held = run.Requests.Where(r => r.Value.Asked < r.Value.Daily).ToList();
+            if (held.Count > 0)
+                Main.Log("contracts: asking for less than a full day, with cars still in work: " +
+                         string.Join(", ", held.Select(r => $"{r.Key} {r.Value.Asked} of {r.Value.Daily}")));
 
             // Bills for cars already on the map; their jobs come after the new cars are placed.
             var onTheMap = new List<(TrainCar Car, Waybill W)>();
@@ -532,32 +755,112 @@ namespace Contracts.Mod.Runtime
             }
             run.OnTheMap = Chunks(onTheMap);
 
-            // The orders, each interchange's cars in order, to fill its empty tracks one after another.
             run.Orders = plan.Orders.Select(o => (Order: o, Cars: new List<TrainCar>())).ToList();
+            AddFills(run);
+            service = run;
+            run.Work.Then(PlaceNext);
+            run.WorkMs += watch.Elapsed.TotalMilliseconds;
+            run.LongestStepMs = run.WorkMs;
+            return true;
+        }
+
+        /// <summary>The contracts' cars still in work now, from their waybills (Contracts.Core WorkInHand).</summary>
+        internal WorkInHand InHand() =>
+            WorkInHand.From(State.Waybills.Select(w => new BilledCar { Id = w.Guid, Contract = w.Contract, Next = w.Next, Cargo = w.Cargo, Stage = StageOf(w.Stage) }),
+                Economy?.Data);
+
+        /// <summary>A car the service takes off the map: on an interchange track, set out for pickup or brought there with its job done.</summary>
+        private static bool LeavesTheMap(Waybill w, TrainCar car, JobsManager jobs) =>
+            InterchangeYards.IsInterchangeTrack(car.logicCar.FrontBogieTrack)
+            && (w.Stage == Stage.OffMap || w.Stage == Stage.ToInterchange && jobs?.GetJobOfCar(car.logicCar) == null);
+
+        private void TakeAway(Waybill w, TrainCar car)
+        {
+            removing.Add(w.Guid);
+            SingletonBehaviour<CarSpawner>.Instance.DeleteCar(car);
+            State.Remove(w.Guid);
+        }
+
+        /// <summary>
+        /// The service again, for the cars it had no room for (owner, 2026-11-10: "if an
+        /// interchange is full it needs to attempt serving again later"; Contracts.Core
+        /// ServiceRetry). It takes away the cars that leave the map, as a day's service does,
+        /// then places the waiting cars that now fit and writes their jobs, a step a frame like
+        /// the day's. It plans nothing: the cars on the map keep their bills. What still waits
+        /// after it waits for the next. Returns false with nothing left to place.
+        /// </summary>
+        public bool BeginRetry()
+        {
+            FinishService();
+            var held = new HashSet<string>(State.Contracts.Select(c => c.Id), StringComparer.Ordinal);
+            var orders = ServiceRetry.Held(State.Waiting.Select(w => w.Order()), held.Contains);
+            if (orders.Count == 0)
+            {
+                State.Waiting.Clear();
+                State.RetryAt = null;
+                return false;
+            }
+            var watch = Stopwatch.StartNew();
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var run = new ServiceRun { Day = State.ServiceDay, Opened = Clock, Retry = true, Contracts = orders.Select(o => o.Contract).Distinct().Count() };
+            foreach (var w in State.Waybills.ToList())
+            {
+                var car = registry?.GetTrainCarByCarGuid(w.Guid);
+                if (car == null || car.logicCar == null || !LeavesTheMap(w, car, jobs))
+                    continue;
+                TakeAway(w, car);
+                run.Taken++;
+            }
+            run.OnTheMap = new List<Chunk>();
+            run.Orders = orders.Select(o => (Order: o, Cars: new List<TrainCar>())).ToList();
+            AddFills(run);
+            service = run;
+            run.Work.Then(PlaceNext);
+            run.WorkMs += watch.Elapsed.TotalMilliseconds;
+            run.LongestStepMs = run.WorkMs;
+            return true;
+        }
+
+        /// <summary>Runs a retry now, to the end (the probe); returns its summary, or null with nothing waiting.</summary>
+        public string Retry()
+        {
+            if (!BeginRetry())
+                return null;
+            FinishService();
+            return LastService?.Summary;
+        }
+
+        /// <summary>Whether an order's cars can be made at all: the game has its car type, and its cargo if it comes loaded.</summary>
+        private static bool Placeable(Order o, out TrainCarLivery livery, out CargoType cargo)
+        {
+            livery = null;
+            cargo = CargoType.None;
+            if (!Globals.G.Types.TryGetCarType(o.CarType, out var type) || type.liveries == null || type.liveries.Count == 0)
+                return false;
+            livery = type.liveries[0];
+            return !o.Loaded || o.Cargo != null && Enum.TryParse(o.Cargo, out cargo);
+        }
+
+        /// <summary>The run's orders as fills: each interchange's cars in order, to fill its empty tracks one after another.</summary>
+        private static void AddFills(ServiceRun run)
+        {
             foreach (var at in run.Orders.GroupBy(r => r.Order.Interchange))
             {
                 var wanted = new List<(int Order, TrainCarLivery Livery, CargoType Cargo)>();
                 foreach (var r in at)
                 {
                     var o = r.Order;
-                    if (!Globals.G.Types.TryGetCarType(o.CarType, out var type) || type.liveries == null || type.liveries.Count == 0)
+                    if (!Placeable(o, out var livery, out var cargo))
                     {
-                        Main.Warn($"contracts: no car type {o.CarType} for an order of {o.Count}");
+                        Main.Warn($"contracts: no car type {o.CarType}{(o.Loaded ? $" or cargo {o.Cargo}" : "")} for an order of {o.Count}");
                         continue;
                     }
-                    var cargo = CargoType.None;
-                    if (o.Loaded && (o.Cargo == null || !Enum.TryParse(o.Cargo, out cargo)))
-                        continue;
                     for (var i = 0; i < o.Count; i++)
-                        wanted.Add((run.Orders.FindIndex(x => ReferenceEquals(x.Order, o)), type.liveries[0], cargo));
+                        wanted.Add((run.Orders.FindIndex(x => ReferenceEquals(x.Order, o)), livery, cargo));
                 }
                 run.Fills.Add(new Fill { Interchange = at.Key, Wanted = wanted, Cuts = new TrackFill<Track>(wanted.Count, InterchangeYards.Tracks(at.Key)) });
             }
-            service = run;
-            run.Work.Then(PlaceNext);
-            run.WorkMs += watch.Elapsed.TotalMilliseconds;
-            run.LongestStepMs = run.WorkMs;
-            return true;
         }
 
         /// <summary>The service's next step, this frame (Update; the probe).</summary>
@@ -607,39 +910,70 @@ namespace Contracts.Mod.Runtime
             while (run.Filling < run.Fills.Count)
             {
                 var fill = run.Fills[run.Filling];
-                var cut = fill.Cuts.Next(FreeForCut, t => t.length, (from, count) => CutLength(spawner, fill, from, count));
-                if (cut == null)
+                try
                 {
-                    if (fill.Cuts.Unplaced > 0)
-                        Main.Warn($"contracts: interchange {fill.Interchange} had no room for {fill.Cuts.Unplaced} of {fill.Cuts.Cars} car(s)");
-                    run.Filling++;
-                    continue;
+                    var cut = fill.Cuts.Next(FreeForCut, t => t.length, (from, count) => CutLength(spawner, fill, from, count));
+                    if (cut == null)
+                    {
+                        if (fill.Cuts.Unplaced > 0)
+                            Main.Warn($"contracts: interchange {fill.Interchange} had no room for {fill.Cuts.Unplaced} of {fill.Cuts.Cars} car(s); they wait for the service to come again");
+                        run.Filling++;
+                        continue;
+                    }
+                    // A cut placed: a frame for the game to set its cars up, with no other cut in it.
+                    if (Spawn(run, fill, cut, spawner))
+                        run.Work.Then(() => run.Doing = "a frame for the cut's cars to settle");
                 }
-                // A cut placed: a frame for the game to set its cars up, with no other cut in it.
-                if (Spawn(run, fill, cut, spawner))
-                    run.Work.Then(() => run.Doing = "a frame for the cut's cars to settle");
+                catch (Exception e)
+                {
+                    // The rest of this interchange's cars wait for the service to come again; the
+                    // other interchange, the jobs and the summary still follow. (A cut that threw
+                    // used to end the day's service there, with no jobs for the cars on the map.)
+                    run.Failed++;
+                    run.Filling++;
+                    Main.Error($"contracts: placing new cars at {fill.Interchange} failed; its {fill.Cuts.Unplaced} car(s) left wait for the service to come again: {e}");
+                }
                 run.Work.Then(PlaceNext);
                 return;
             }
 
             // Every cut placed: the new cars' bills in the orders' order, as the service has always
-            // listed them, then the jobs, a step each.
-            var fresh = run.Orders.SelectMany(r => r.Cars).Where(c => c != null).Select(c => State.Of(c.logicCar.carGuid)).Where(w => w != null).ToList();
-            var set = new HashSet<Waybill>(fresh);
-            State.Waybills.RemoveAll(set.Contains);
-            foreach (var w in fresh)
-                State.Add(w);
-            var placed = run.Orders.SelectMany(r => r.Cars).Where(c => c != null && State.Of(c.logicCar.carGuid) != null)
-                .Select(c => (Car: c, W: State.Of(c.logicCar.carGuid))).ToList();
-            foreach (var chunk in run.OnTheMap.Concat(Chunks(placed)))
-                run.Work.Then(() =>
-                {
-                    run.Doing = $"a job for {chunk.Cars.Count} car(s)";
-                    if (Write(chunk))
-                        run.Made++;
-                });
-            run.Work.Then(EndService);
-            run.Doing = "the bills reordered, the jobs grouped";
+            // listed them, then the jobs, a step each. The summary follows whatever happens here.
+            try
+            {
+                var fresh = run.Orders.SelectMany(r => r.Cars).Where(c => c != null).Select(c => State.Of(c.logicCar.carGuid)).Where(w => w != null).ToList();
+                var set = new HashSet<Waybill>(fresh);
+                State.Waybills.RemoveAll(set.Contains);
+                foreach (var w in fresh)
+                    State.Add(w);
+                var placed = run.Orders.SelectMany(r => r.Cars).Where(c => c != null && State.Of(c.logicCar.carGuid) != null)
+                    .Select(c => (Car: c, W: State.Of(c.logicCar.carGuid))).ToList();
+                foreach (var chunk in run.OnTheMap.Concat(Chunks(placed)))
+                    run.Work.Then(() =>
+                    {
+                        run.Doing = $"a job for {chunk.Cars.Count} car(s)";
+                        try
+                        {
+                            if (Write(chunk))
+                                run.Made++;
+                        }
+                        catch (Exception e)
+                        {
+                            run.Failed++;
+                            Main.Error($"contracts: writing a job for {chunk.Cars.Count} car(s) failed; the next service plans them again: {e}");
+                        }
+                    });
+                run.Doing = "the bills reordered, the jobs grouped";
+            }
+            catch (Exception e)
+            {
+                run.Failed++;
+                Main.Error($"contracts: grouping the service's jobs failed; the next service plans the cars again: {e}");
+            }
+            finally
+            {
+                run.Work.Then(EndService);
+            }
         }
 
         /// <summary>An interchange track a cut can go on: no car on it, even in part.</summary>
@@ -650,6 +984,9 @@ namespace Contracts.Mod.Runtime
             spawner.GetTotalCarLiveriesLength(fill.Wanted.Skip(from).Take(count).Select(w => w.Livery).ToList(), true);
 
 #if DEVTOOLS
+        /// <summary>The probe's fault: the next cut placed throws, to see the service go on past it.</summary>
+        internal static bool FailNextCut;
+
         /// <summary>
         /// The cuts the service just begun would make placing them all now, as it did before it
         /// went a step a frame (the probe checks the steps make the same).
@@ -677,6 +1014,13 @@ namespace Contracts.Mod.Runtime
         /// <summary>Spawns a cut, loaded if its orders say so, and bills its cars at once; false if it failed (its cars go to the next track).</summary>
         private bool Spawn(ServiceRun run, Fill fill, TrackCut<Track> cut, CarSpawner spawner)
         {
+#if DEVTOOLS
+            if (FailNextCut)
+            {
+                FailNextCut = false;
+                throw new InvalidOperationException("the probe's fault: a cut that throws");
+            }
+#endif
             var wanted = fill.Wanted.Skip(cut.From).Take(cut.Count).ToList();
             var cars = spawner.SpawnCarTypesOnTrack(wanted.Select(w => w.Livery).ToList(), null, RailTrackRegistry.LogicToRailTrack[cut.Track],
                 preventAutoCoupleOnLastCars: true, applyHandbrakeOnLastCars: true);
@@ -710,13 +1054,26 @@ namespace Contracts.Mod.Runtime
         {
             var run = service;
             var short_ = run.Orders.Sum(r => r.Order.Count - r.Cars.Count);
-            run.Summary = $"service day {run.Day}: {run.Contracts} contract(s) at work; {run.Taken} car(s) taken off the map, {run.Gone} gone, " +
-                          (run.Asleep > 0 ? $"{run.Asleep} suspended by Persistent Jobs (kept), " : "") + $"{run.Idled} back to idle, " +
-                          (run.Recalled > 0 ? $"{run.Recalled} moved off an interchange back to idle, " : "") + $"{run.Withdrawn} withdrawn; " +
-                          $"{run.Bills} bill(s) ({run.SetOut} set out for pickup), {run.Placed} car(s) placed ({short_} short), {run.Made} job(s)";
+            // What found no room waits off the map, and the service comes again for it (Contracts.Core
+            // ServiceRetry). An order the game can't make cars for is not waited for.
+            var left = ServiceRetry.Left(run.Orders.Select(r => (r.Order, r.Cars.Count))).Where(o => Placeable(o, out _, out _)).ToList();
+            var waiting = ServiceRetry.Cars(left);
+            State.Waiting = left.Select(WaitingOrder.Of).ToList();
+            State.RetryAt = waiting > 0 && Clock is double ended ? ServiceRetry.NextAt(ended) : (double?)null;
+            var again = waiting > 0 && State.RetryAt is double at && Clock is double clock ? $"; {waiting} wait for a free interchange track, the service comes again {ServiceRetry.At(at, clock)}" : "";
+            run.Summary = run.Retry
+                ? $"service day {run.Day}, again for the cars it had no room for: {run.Taken} car(s) taken off the map; " +
+                  $"{run.Placed} car(s) placed ({short_} short), {run.Made} job(s){again}"
+                : $"service day {run.Day}: {run.Contracts} contract(s) at work; {run.Taken} car(s) taken off the map, {run.Gone} gone, " +
+                  (run.Asleep > 0 ? $"{run.Asleep} suspended by Persistent Jobs (kept), " : "") + $"{run.Idled} back to idle, " +
+                  (run.Recalled > 0 ? $"{run.Recalled} moved off an interchange back to idle, " : "") + $"{run.Withdrawn} withdrawn; " +
+                  $"{run.Bills} bill(s) ({run.SetOut} set out for pickup), {run.Placed} car(s) placed ({short_} short), {run.Made} job(s){again}";
+            if (run.Failed > 0)
+                run.Summary += $"; {run.Failed} part(s) failed and were left for the next service (see the errors above)";
             Main.Log($"contracts: {run.Summary} (in {run.Work.Run} steps after the plan, {run.WorkMs:F0} ms of work so far, the longest step {run.LongestStepMs:F0} ms)");
             run.Doing = "the summary";
-            Notes.Add(run.Summary);
+            if (!run.Retry)
+                Notes.Add(run.Summary);
             LastServiceDay = run.Day;
             LastService = run;
             LogJobless("after the service");
@@ -909,7 +1266,7 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>Takes a job not yet taken off its station: its booklet, then the job itself (it expires; its chain goes with it).</summary>
-        private static void Withdraw(Job job)
+        internal static void Withdraw(Job job)
         {
             var station = StationController.allStations?.FirstOrDefault(s => s != null && s.logicStation != null && s.logicStation.availableJobs.Contains(job));
             if (station != null)

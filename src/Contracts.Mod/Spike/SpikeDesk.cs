@@ -111,7 +111,23 @@ namespace Contracts.Mod.Spike
             Main.Log($"spike desk: {contract.Id} asks for level {level} from midnight");
         }
 
+        public bool StartsAtOnce => false;
+
+        public string Hold => null;
+
+        public double Money => Runtime.LocoShop.Money;
+
+        public IReadOnlyList<ShopRow> Shop(bool coaches, KioskPlace place) => Runtime.RuntimeDesk.ShopRows(coaches, place);
+
+        public string Buy(bool coaches, string key, KioskPlace place) => Runtime.RuntimeDesk.BuyRow(coaches, key, place);
+
+        public IReadOnlyList<SaleRow> Selling() => Runtime.RuntimeDesk.SaleRows();
+
+        public string Sell(string key) => Runtime.RuntimeDesk.SellRow(key);
+
         public string RaiseBlocker(ContractView contract) => null;
+
+        public string RaiseValue(ContractView contract) => null;
 
         public void End(ContractView contract)
         {
@@ -125,6 +141,8 @@ namespace Contracts.Mod.Spike
         public double Owed => 0.0;
 
         public (int Count, string Text) Jobless() => (0, null);
+
+        public (int Cars, string Page) Waiting() => (0, null);
 
         public ContractCarsView Cars(ContractView mine) => null;
 

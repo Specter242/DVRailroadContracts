@@ -103,8 +103,11 @@ namespace Contracts.Mod.Kiosk
         /// <summary>The API's check before it opens an entry: a Multiplayer client's contracts are the host's.</summary>
         private static bool CanOpen(out string why)
         {
-            why = Multiplayer.IsClient ? "Contracts are managed by the host." : string.Empty;
-            return !Multiplayer.IsClient;
+            why = string.Empty;
+            if (!Multiplayer.IsClient || DeskNet.ClientReady(out var waiting))
+                return true;
+            why = waiting;
+            return false;
         }
     }
 }

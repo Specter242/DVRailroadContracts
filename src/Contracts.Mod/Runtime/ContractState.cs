@@ -18,6 +18,8 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("level")] public int Level;          // 0 until its first midnight
         [JsonProperty("requested")] public int Requested;  // the level from the next midnight
         [JsonProperty("since")] public int SinceDay;       // the contract day it was taken
+        // Asked to end: it ends at the next midnight, with its penalty then (from 0.1.12; before, at once).
+        [JsonProperty("ending")] public bool Ending;
         // Its standing (Contracts.Core ContractStanding): daily scores at this level, newest last,
         // and the final ages (days) of its bills closed since the last midnight.
         [JsonProperty("history")] public List<double> History = new List<double>();
@@ -83,14 +85,58 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("price")] public double Price;   // this car's share of what was paid
     }
 
-    /// <summary>The runtime's saved state, under its own save key (design, "Saves").</summary>
+    /// <summary>
+    /// New cars a service had no room for on their interchange's tracks (Contracts.Core
+    /// ServiceRetry): an order's cars still to place, waiting off the map for the service to
+    /// come again.
+    /// </summary>
+    internal sealed class WaitingOrder
+    {
+        [JsonProperty("interchange")] public string Interchange;
+        [JsonProperty("contract")] public string Contract;
+        [JsonProperty("type")] public string CarType;
+        [JsonProperty("cargo")] public string Cargo;
+        [JsonProperty("to")] public string BilledTo;
+        [JsonProperty("then")] public string Then;
+        [JsonProperty("loaded")] public bool Loaded;
+        [JsonProperty("count")] public int Count;
+
+        public static WaitingOrder Of(Contracts.Core.Industries.Order o) => new WaitingOrder
+        {
+            Interchange = o.Interchange, Contract = o.Contract, CarType = o.CarType, Cargo = o.Cargo,
+            BilledTo = o.BilledTo, Then = o.Then, Loaded = o.Loaded, Count = o.Count,
+        };
+
+        public Contracts.Core.Industries.Order Order() => new Contracts.Core.Industries.Order
+        {
+            Interchange = Interchange, Contract = Contract, CarType = CarType, Cargo = Cargo,
+            BilledTo = BilledTo, Then = Then, Loaded = Loaded, Count = Count,
+        };
+    }
+
+    /// <summary>
+    /// The runtime's saved state, under its own save key (design, "Saves").
+    ///
+    /// **Versions.** <see cref="Version"/> says who can read a save, not who wrote it:
+    /// - a field added with a harmless default (as every one since 0.1.0: the standing, owed,
+    ///   the industries' work, the purchases, an end asked for, the cars waiting for room) leaves
+    ///   it alone. An older build then reads the save without the field and drops it on its next
+    ///   save, which loses that detail and nothing else;
+    /// - a change an older build would misread (a field's meaning, a stage renumbered) raises
+    ///   it, and older builds then leave the save alone with contracts off, as <see cref="Parse"/>
+    ///   does for a newer one.
+    /// <see cref="ModVersion"/> names the build that wrote it, for the log. What is read is put
+    /// right by <see cref="Normalize"/>: a list left out or null, a stage a newer build added.
+    /// </summary>
     internal sealed class ContractState
     {
         public const string Key = "contracts_mod";
         public const int CurrentVersion = 1;
 
         [JsonProperty("version")] public int Version = CurrentVersion;
+        [JsonProperty("mod")] public string ModVersion;          // the build that wrote the save (from 0.1.12)
         [JsonProperty("starter")] public bool StarterGiven;
+        [JsonProperty("starterDue")] public bool StarterDue;     // a new career whose starter could not be delivered yet: tried again at each load
         [JsonProperty("seed")] public ulong Seed = (ulong)DateTime.UtcNow.Ticks;
         [JsonProperty("day")] public int Day = -1;               // the contract day last rolled over at midnight
         [JsonProperty("service")] public int ServiceDay = -1;    // the contract day of the last 06:00 service
@@ -98,6 +144,9 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("waybills")] public List<Waybill> Waybills = new List<Waybill>();
         [JsonProperty("owed")] public double Owed;              // penalties not yet taken from the wallet (ContractPay)
         [JsonProperty("bought")] public List<Purchase> Bought = new List<Purchase>();   // vehicles bought at the kiosk, from 0.1.9
+        // New cars the last service had no room for, and when it comes again for them (from 0.1.12).
+        [JsonProperty("waiting")] public List<WaitingOrder> Waiting = new List<WaitingOrder>();
+        [JsonProperty("retry")] public double? RetryAt;
 
         [JsonIgnore] private Dictionary<string, Waybill> byGuid;
 
@@ -123,10 +172,12 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>The state in a save, or null if it has none or it can't be read (then the runtime stays off).</summary>
-        public static ContractState Read(SaveGameData data, out bool unreadable)
+        public static ContractState Read(SaveGameData data, out bool unreadable) => Parse(data?.GetJObject(Key), out unreadable);
+
+        /// <summary>The state from its saved form; null with none, or if it can't be read or a newer build's format (said in the log).</summary>
+        public static ContractState Parse(JObject saved, out bool unreadable)
         {
             unreadable = false;
-            var saved = data?.GetJObject(Key);
             if (saved == null)
                 return null;
             try
@@ -134,9 +185,14 @@ namespace Contracts.Mod.Runtime
                 var state = saved.ToObject<ContractState>();
                 if (state == null || state.Version > CurrentVersion)
                 {
+                    Main.Error($"the saved contracts are in a newer format (version {state?.Version}, written by {state?.ModVersion ?? "a newer build"}; " +
+                               $"this build reads up to {CurrentVersion}); contracts stay off and the save keeps them. Update Railroad Contracts");
                     unreadable = true;
                     return null;
                 }
+                var mended = state.Normalize();
+                if (mended.Count > 0)
+                    Main.Warn($"the saved contracts (written by {state.ModVersion ?? "0.1.11 or earlier"}) were put right: {string.Join("; ", mended)}");
                 return state;
             }
             catch (Exception e)
@@ -147,7 +203,61 @@ namespace Contracts.Mod.Runtime
             }
         }
 
-        public void Write(SaveGameData data) => data.SetJObject(Key, JObject.FromObject(this));
+        /// <summary>
+        /// Puts right what a save can hold that the runtime can't work with: lists left null, records
+        /// with no id, levels out of range, a stage this build doesn't know (a newer build's: the
+        /// car goes idle, and the next service plans it again). Returns what it changed.
+        /// </summary>
+        public List<string> Normalize()
+        {
+            var mended = new List<string>();
+            Contracts = Contracts ?? new List<HeldContract>();
+            Waybills = Waybills ?? new List<Waybill>();
+            Bought = Bought ?? new List<Purchase>();
+            Waiting = Waiting ?? new List<WaitingOrder>();
+            var before = (Contracts.Count, Waybills.Count, Bought.Count, Waiting.Count);
+            Contracts.RemoveAll(c => c == null || string.IsNullOrEmpty(c.Id));
+            Waybills.RemoveAll(w => w == null || string.IsNullOrEmpty(w.Guid));
+            Bought.RemoveAll(p => p == null || string.IsNullOrEmpty(p.Guid));
+            Waiting.RemoveAll(o => o == null || o.Count <= 0 || string.IsNullOrEmpty(o.Interchange) || string.IsNullOrEmpty(o.CarType));
+            var dropped = before.Item1 - Contracts.Count + before.Item2 - Waybills.Count + before.Item3 - Bought.Count + before.Item4 - Waiting.Count;
+            if (dropped > 0)
+                mended.Add($"{dropped} record(s) without an id dropped");
+            foreach (var c in Contracts)
+            {
+                c.History = c.History ?? new List<double>();
+                c.Closed = c.Closed ?? new List<double>();
+                c.Due = c.Due ?? new List<double>();
+                c.Running = c.Running ?? new List<Departure>();
+                c.Running.RemoveAll(r => r == null);
+                var (level, requested) = (Math.Max(0, Math.Min(5, c.Level)), Math.Max(0, Math.Min(5, c.Requested)));
+                if (level != c.Level || requested != c.Requested)
+                {
+                    mended.Add($"{c.Id}'s level {c.Level} (asked {c.Requested}) brought within 0 to 5");
+                    c.Level = level;
+                    c.Requested = requested;
+                }
+            }
+            foreach (var w in Waybills.Where(w => !Enum.IsDefined(typeof(Stage), w.Stage)))
+            {
+                mended.Add($"car {w.Guid}'s stage {(int)w.Stage}, unknown to this build, made idle");
+                w.Stage = Stage.Idle;
+                w.Opened = w.Spotted = w.Ready = null;
+            }
+            if (Owed < 0.0 || double.IsNaN(Owed))
+            {
+                mended.Add($"owed {Owed} made 0");
+                Owed = 0.0;
+            }
+            byGuid = null;
+            return mended;
+        }
+
+        public void Write(SaveGameData data)
+        {
+            ModVersion = Main.Version;
+            data.SetJObject(Key, JObject.FromObject(this));
+        }
 
         /// <summary>The guids of the contract cars in a save, read before the runtime starts (for the deleter guard at load).</summary>
         public static HashSet<string> GuidsIn(SaveGameData data)

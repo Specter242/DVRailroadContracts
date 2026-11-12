@@ -96,21 +96,30 @@ namespace Contracts.Core.Industries
         /// <summary>Carloads a day of a role at a level.</summary>
         public int Daily(LineRole role, int level) => IndustrySettings.DailyCarloads(Level5(role), level);
 
+        /// <summary>A role's carloads at a level, shared among its lines by weight, earlier lines first: its standing split.</summary>
+        public IReadOnlyList<(CargoLine Line, int Carloads)> Split(LineRole role, int level) => Share(role, Daily(role, level), 0);
+
         /// <summary>
-        /// A role's carloads at a level, shared among its lines by weight. Remainders go to the
-        /// largest fractions, earlier lines first, so the split is the same every day.
+        /// A number of a role's carloads shared among its lines by weight. Remainders go to the
+        /// largest fractions; among equal ones the turn passes on a line each day
+        /// (<paramref name="day"/>), so a role with more lines than carloads serves them all in
+        /// turn. With earlier lines always first, the last lines got nothing every day: the
+        /// Machine Factory's town takes ten goods and is due seven carloads at level 1 (owner,
+        /// 2026-11-10: "let's fix the uneven cargo split").
         /// </summary>
-        public IReadOnlyList<(CargoLine Line, int Carloads)> Split(LineRole role, int level)
+        public IReadOnlyList<(CargoLine Line, int Carloads)> Share(LineRole role, int carloads, int day)
         {
             var lines = LinesOf(role).ToList();
-            var total = Daily(role, level);
+            var total = Math.Max(0, carloads);
             if (lines.Count == 0 || total == 0)
                 return lines.Select(l => (l, 0)).ToList();
             var weights = lines.Sum(l => l.Weight);
             var exact = lines.Select(l => total * l.Weight / weights).ToList();
             var counts = exact.Select(e => (int)Math.Floor(e)).ToList();
             var left = total - counts.Sum();
-            foreach (var i in Enumerable.Range(0, lines.Count).OrderByDescending(i => exact[i] - counts[i]).ThenBy(i => i).Take(left))
+            var n = lines.Count;
+            var first = ((day % n) + n) % n;
+            foreach (var i in Enumerable.Range(0, n).OrderByDescending(i => Math.Round(exact[i] - counts[i], 9)).ThenBy(i => (i - first + n) % n).Take(left))
                 counts[i]++;
             return lines.Select((l, i) => (l, counts[i])).ToList();
         }
@@ -173,9 +182,6 @@ namespace Contracts.Core.Industries
         /// </summary>
         public static double Ratio(LineRole role) =>
             role == LineRole.Material ? 0.5 : role == LineRole.Product ? 1.0 / 3.0 : 1.0 / 6.0;
-
-        /// <summary>A contract day in world-clock minutes: one game day, so sleeping advances it (D6).</summary>
-        public double DayMinutes { get; set; } = 24 * 60;
 
         public static double Factor(int level) => level < 1 ? 0.0 : LevelFactors[Math.Min(5, level) - 1];
 

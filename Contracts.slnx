@@ -2,5 +2,6 @@
   <Folder Name="/src/">
     <Project Path="src/Contracts.Core/Contracts.Core.csproj" />
     <Project Path="src/Contracts.Mod/Contracts.Mod.csproj" />
+    <Project Path="src/Contracts.Multiplayer/Contracts.Multiplayer.csproj" />
   </Folder>
 </Solution>

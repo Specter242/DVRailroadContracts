@@ -16,7 +16,8 @@ cap=(systemd-run --user --scope -q -p MemoryMax=6G -p MemorySwapMax=0)
 
 echo "Packaging $id $version"
 "${cap[@]}" dotnet test "$repo/Contracts.slnx" -c Release -nologo -v quiet -p:DvInstallDir="$dv"
-if ! build="$("${cap[@]}" dotnet build "$repo/src/Contracts.Mod/Contracts.Mod.csproj" -c Release -p:DvInstallDir="$dv" -p:DevTools=false --no-incremental -nologo 2>&1)"; then
+# The Multiplayer part builds the mod with it (its project references it) and lands beside Contracts.dll.
+if ! build="$("${cap[@]}" dotnet build "$repo/src/Contracts.Multiplayer/Contracts.Multiplayer.csproj" -c Release -p:DvInstallDir="$dv" -p:DevTools=false --no-incremental -nologo 2>&1)"; then
     grep -E "error" <<<"$build" | sort -u >&2
     exit 1
 fi
@@ -33,7 +34,12 @@ fi
 stage="$repo/dist/stage"
 rm -rf "${stage:?}" "$zipfile"
 mkdir -p "$stage/$id"
-cp "$out/Info.json" "$out/Contracts.dll" "$out/Contracts.Core.dll" "$stage/$id/"
+# Never the Multiplayer mod's own API: it ships that, and won't load beside another copy.
+if [ -e "$out/MultiplayerAPI.dll" ]; then
+    echo "MultiplayerAPI.dll is in the build output; it must not be packaged" >&2
+    exit 1
+fi
+cp "$out/Info.json" "$out/Contracts.dll" "$out/Contracts.Core.dll" "$out/Contracts.Multiplayer.dll" "$stage/$id/"
 cp "$repo/LICENSE" "$repo/CHANGELOG.md" "$stage/$id/"
 (cd "$stage" && zip -q -X -r "$zipfile" "$id")
 rm -rf "${stage:?}"

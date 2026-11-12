@@ -319,6 +319,9 @@ namespace Contracts.Mod.Runtime
             Try("shop", ShopCheck);
             yield return null;
             yield return SaleCheck();
+            Try("the career's first contract", () => FirstContractCheck(rt));
+            // The checks from here take contracts the old way (at midnight) and run their services themselves.
+            RuntimeDesk.OpensAtOnce = false;
             string taken = null;
             Try("contract and service", () => taken = ServiceCheck(rt));
             yield return new WaitForSeconds(3f);
@@ -350,6 +353,8 @@ namespace Contracts.Mod.Runtime
             yield return new WaitForSeconds(2f);
             Try("jobs after the second service", () => JobsCheck(rt, taken));
             Try("standing", () => StandingCheck(rt, taken));
+            Try("the day's roll and the hold", () => RollCheck(rt, taken));
+            Try("the kiosk of a player who joined", () => RemoteDeskCheck(rt, taken));
             // While the contract is still held: the pay check lowers and ends it.
             yield return CarsCheck(rt, taken);
             yield return PayCheck(rt, taken);
@@ -609,6 +614,15 @@ namespace Contracts.Mod.Runtime
             Line($"starter: given {given}; owned DE2s {de2.Count} ({string.Join(", ", de2.Select(c => $"{c.ID} on {c.logicCar.FrontBogieTrack?.ID?.FullDisplayID}"))}); Manual Service {manual}; owned cars before {before}");
             if (!given || de2.Count == 0 || !manual)
                 Problem("the starter was not given");
+            // The comms radio's Clear passes over an owned vehicle (preventDelete), and selling the only locomotive is warned of.
+            var units = VehicleSales.Owned();
+            var loco = units.FirstOrDefault(u => u.Cars.Any(c => de2.Contains(c)));
+            var ask = loco == null ? null : VehicleSales.Ask(loco);
+            Line($"starter: kept from Clear: {string.Join(", ", de2.Select(c => $"{c.ID} {c.preventDelete}"))}; {units.Count} owned unit(s); selling it asks: {ask}");
+            if (de2.Any(c => !c.preventDelete))
+                Problem("starter: an owned locomotive is not kept from the comms radio's Clear");
+            if (units.Count(u => u.Cars.Any(c => CarTypes.IsLocomotive(c.carLivery))) == 1 && (ask == null || !ask.Contains("It is your only locomotive")))
+                Problem("starter: selling the only locomotive is not warned of");
         }
 
         private void ShopCheck()
@@ -693,6 +707,89 @@ namespace Contracts.Mod.Runtime
         /// derailed one sells where it stands; a train of two coaches sells together; a DE2
         /// bought after a sale is new; and the kiosk's Sell vehicles rows are the offers.
         /// </summary>
+        /// <summary>
+        /// A career's first contract (owner, 2026-11-10: "Faster service is fine"; mikebackwards,
+        /// Nexus: "need to wait 6 real time hours ... until I can play the game?"):
+        ///
+        /// - with none at work, a contract taken starts at level 1 at once and the service comes
+        ///   for it now, as the day's own: cars placed, billed, with jobs;
+        /// - a second contract taken then waits for midnight, as before, and is given up at once;
+        /// - the first, asked to end the day it was taken, quotes no penalty; midnight ends it at
+        ///   no cost, and its cars still on interchange tracks, their jobs not taken, are set out
+        ///   for the pickup with their jobs withdrawn (they kept the tracks from new cuts);
+        /// - the bridge is locked until a contract is at level 3.
+        /// </summary>
+        private void FirstContractCheck(ContractRuntime rt)
+        {
+            var desk = KioskMenu.Desk;
+            var inventory = SingletonBehaviour<Inventory>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var place = new KioskPlace { Id = "MF", Name = "MF" };
+            var offers = desk.Offers(place);
+            var bridge = offers.FirstOrDefault(o => o.Id == Economy.BridgeId);
+            Line($"first: the bridge offer: {(bridge == null ? "none" : $"needs '{bridge.Needs}'")}; starts at once {desk.StartsAtOnce}");
+            if (bridge == null || bridge.Needs != "Needs a contract at level 3")
+                Problem("first: the bridge is not locked until a contract is at level 3");
+            else
+            {
+                desk.Take(bridge, 1);
+                if (rt.State.Contracts.Any(c => c.Id == Economy.BridgeId))
+                    Problem("first: the locked bridge was taken");
+            }
+            var first = offers.FirstOrDefault(o => o.Needs == null && o.Id != "MF" && o.Id != Economy.BridgeId && !RuntimeDesk.IsPassenger(o.Id));
+            if (first == null || !desk.StartsAtOnce)
+            {
+                Problem("first: no offer to take as the career's first, or it would not start at once");
+                return;
+            }
+            var today = ContractRuntime.DayOf(ContractRuntime.Now ?? DateTime.Now);
+            var money = inventory.PlayerMoney;
+            desk.Take(first, 1);
+            var held = rt.State.Contracts.FirstOrDefault(c => c.Id == first.Id);
+            var begun = rt.Servicing;
+            rt.FinishService();
+            var run = rt.LastService;
+            var theirs = rt.State.Waybills.Where(w => w.Contract == first.Id).ToList();
+            var withJobs = theirs.Count(w => registry.GetTrainCarByCarGuid(w.Guid) is TrainCar c && jobs.GetJobOfCar(c.logicCar) != null);
+            Line($"first: took {first.Id}: level {held?.Level}, service begun {begun}, day {run?.Day} (today {today}, service day {rt.State.ServiceDay}): {run?.Summary}");
+            Line($"first: {theirs.Count} car(s) billed to it, {withJobs} with a job; starts at once now {desk.StartsAtOnce}");
+            if (held == null || held.Level != 1 || !begun || run == null || run.Day != today || rt.State.ServiceDay != today || theirs.Count == 0 || withJobs == 0)
+                Problem("first: the career's first contract did not start at once with its cars and jobs");
+            if (held == null)
+                return;
+            if (desk.StartsAtOnce)
+                Problem("first: a second contract would start at once too");
+            var second = desk.Offers(place).FirstOrDefault(o => o.Needs == null && o.Id != "MF" && o.Id != Economy.BridgeId && !RuntimeDesk.IsPassenger(o.Id));
+            if (second != null)
+            {
+                desk.Take(second, 1);
+                var later = rt.State.Contracts.FirstOrDefault(c => c.Id == second.Id);
+                Line($"first: then took {second.Id}: level {later?.Level}, asks {later?.Requested}");
+                if (later == null || later.Level != 0 || rt.Servicing)
+                    Problem("first: a second contract did not wait for midnight");
+                if (later != null)
+                    desk.End(desk.Mine().First(v => v.Id == second.Id));
+                if (rt.State.Contracts.Any(c => c.Id == second.Id))
+                    Problem("first: a contract not yet started was not given up at once");
+            }
+            // Given up the day it was taken: free, and its untouched cars leave the interchange tracks to the pickup.
+            var view = desk.Mine().First(v => v.Id == first.Id);
+            var quoted = desk.Penalty(view, 0);
+            desk.End(view);
+            rt.State.Day++;
+            rt.Midnight();
+            var left = rt.State.Waybills.Where(w => w.Contract == first.Id).ToList();
+            var onInterchange = left.Where(w => registry.GetTrainCarByCarGuid(w.Guid) is TrainCar c && InterchangeYards.IsInterchangeTrack(c.logicCar.FrontBogieTrack)).ToList();
+            var stillJobs = onInterchange.Count(w => jobs.GetJobOfCar(registry.GetTrainCarByCarGuid(w.Guid).logicCar) != null);
+            Line($"first: given up the same day: quoted ${quoted:N0}; held {rt.State.Contracts.Any(c => c.Id == first.Id)}, money {money:N0} -> {inventory.PlayerMoney:N0}, owed ${rt.State.Owed:N0}; " +
+                 $"{onInterchange.Count} of its {left.Count} car(s) on interchange tracks: {onInterchange.Count(w => w.Stage == Stage.OffMap)} set out, {stillJobs} still with a job; the kiosk tells '{KioskMenu.TakeMessage()}'");
+            if (quoted > 0.5 || rt.State.Contracts.Any(c => c.Id == first.Id) || Math.Abs(inventory.PlayerMoney - money) > 0.5 || rt.State.Owed > 0.5)
+                Problem("first: giving up a contract before its first midnight was not free");
+            if (onInterchange.Count == 0 || onInterchange.Any(w => w.Stage != Stage.OffMap) || stillJobs > 0)
+                Problem("first: the ended contract's cars on interchange tracks were not set out with their jobs withdrawn");
+        }
+
         private IEnumerator SaleCheck()
         {
             var inventory = SingletonBehaviour<Inventory>.Instance;
@@ -1514,6 +1611,32 @@ namespace Contracts.Mod.Runtime
             var left = rt.State.Waybills.Count(w => w.Contract == contract && w.Stage == Stage.OffMap);
             if (waiting > 0 && left >= waiting)
                 Problem("the cars waiting on the interchange tracks did not leave");
+            // Cars come on the industry's request (owner, 2026-11-10): the service orders no more
+            // than the contract asked for; and with this service's cars now in work, the next day's
+            // request is its level's carloads less them, role by role (less still to ship while it
+            // waits for materials).
+            var run = rt.LastService;
+            var hand = rt.InHand();
+            var industry = rt.Economy.Industries.TryGetValue(contract, out var found) ? found : null;
+            var level = rt.State.Contracts.FirstOrDefault(c => c.Id == contract)?.Level ?? 0;
+            var ordered = run?.Orders.Where(o => o.Order.Contract == contract).Sum(o => o.Order.Count) ?? -1;
+            var asked = run != null && run.Requests.TryGetValue(contract, out var r) ? r : (Asked: -1, Daily: -1);
+            Line($"second service: {contract} asked for {asked.Asked} of its {asked.Daily} carloads a day and {ordered} car(s) were ordered for it");
+            if (asked.Asked < 0 || ordered > asked.Asked)
+                Problem($"second service: {ordered} car(s) ordered for a request of {asked.Asked}");
+            if (industry != null && level >= 1)
+            {
+                var roles = new[] { LineRole.Product, LineRole.Material, LineRole.Waste };
+                var next = IndustryPlanner.Requests(industry, level, hand);
+                Line("second service: in work now, and what the next day would ask: " +
+                     string.Join(", ", roles.Select(role => $"{role} {hand.Of(contract, role)} in work, {next[role]} of {industry.Daily(role, level)}")));
+                if (roles.Sum(role => hand.Of(contract, role)) == 0)
+                    Problem("second service: none of the contract's cars count as in work after its service");
+                if (roles.Any(role => next[role] > Math.Max(0, industry.Daily(role, level) - hand.Of(contract, role))))
+                    Problem("second service: the next day would ask for more than the level's carloads less the cars in work");
+                if (roles.Sum(role => next[role]) >= roles.Sum(role => industry.Daily(role, level)))
+                    Problem("second service: with cars in work, the next day would ask for a full day again");
+            }
         }
 
         /// <summary>
@@ -1678,6 +1801,271 @@ namespace Contracts.Mod.Runtime
             Line($"save: {rt.State.Contracts.Count} contracts, {rt.State.Waybills.Count} waybills written; read back {back?.Contracts.Count ?? -1} and {back?.Waybills.Count ?? -1} (unreadable {unreadable}); guids in save {ContractState.GuidsIn(data).Count}");
             if (back == null || back.Waybills.Count != rt.State.Waybills.Count || back.Contracts.Count != rt.State.Contracts.Count)
                 Problem("the saved state did not round-trip");
+            if (back != null && back.ModVersion != Main.Version)
+                Problem($"save: stamped '{back.ModVersion}', not this build's {Main.Version}");
+
+            // Older saves, and ones that are not right (ContractState.Parse, Normalize).
+            // 0.1.0's fields only: everything added since reads as empty.
+            var old = ContractState.Parse(Newtonsoft.Json.Linq.JObject.Parse(
+                "{\"version\":1,\"starter\":true,\"seed\":42,\"day\":6000,\"service\":6000," +
+                "\"contracts\":[{\"id\":\"CME\",\"short\":\"CME Coal Mine East\",\"level\":2,\"requested\":2,\"since\":5990}]," +
+                "\"waybills\":[{\"guid\":\"g1\",\"contract\":\"CME\",\"cargo\":\"Coal\",\"next\":\"CME\",\"then\":\"MF West\",\"stage\":1,\"at\":\"MF West\"}]}"), out var oldBad);
+            var c0 = old?.Contracts.FirstOrDefault();
+            Line($"save: 0.1.0's form: {(old == null ? "not read" : $"{old.Contracts.Count} contract(s), {old.Waybills.Count} waybill(s), stage {old.Waybills.FirstOrDefault()?.Stage}, history {c0?.History?.Count}, bought {old.Bought?.Count}, waiting {old.Waiting?.Count}, written by {old.ModVersion ?? "an older build"}")}");
+            if (old == null || oldBad || c0 == null || c0.Level != 2 || c0.History == null || c0.Closed == null || c0.Due == null || c0.Running == null || c0.Ending
+                || old.Bought == null || old.Waiting == null || old.RetryAt != null || old.Waybills.Count != 1 || old.Waybills[0].Stage != Stage.ToShipper || old.Of("g1") == null)
+                Problem("save: a save with 0.1.0's fields only does not read whole, with what came later empty");
+            // Lists null, a record with no id, a level out of range, a stage a newer build added.
+            var odd = ContractState.Parse(Newtonsoft.Json.Linq.JObject.Parse(
+                "{\"version\":1,\"contracts\":[{\"id\":\"CME\",\"level\":9,\"requested\":9,\"history\":null,\"closed\":null,\"due\":null,\"running\":null},{\"level\":1}]," +
+                "\"waybills\":[{\"guid\":\"g1\",\"stage\":42,\"opened\":6000.5},{\"stage\":1}],\"bought\":null,\"waiting\":null,\"owed\":-5}"), out var oddBad);
+            var c1 = odd?.Contracts.FirstOrDefault();
+            Line($"save: an odd save: {(odd == null ? "not read" : $"{odd.Contracts.Count} contract(s) at level {c1?.Level}, {odd.Waybills.Count} waybill(s) at stage {odd.Waybills.FirstOrDefault()?.Stage}, owed {odd.Owed}")}");
+            if (odd == null || oddBad || odd.Contracts.Count != 1 || c1.Level != 5 || c1.Requested != 5 || c1.History == null || c1.Running == null
+                || odd.Waybills.Count != 1 || odd.Waybills[0].Stage != Stage.Idle || odd.Waybills[0].Opened != null || odd.Bought == null || odd.Waiting == null || odd.Owed != 0.0)
+                Problem("save: a save with nulls, records without ids, a level of 9 and an unknown stage was not put right");
+            // A newer format, and one that is not a state at all: left alone, contracts off.
+            var newer = ContractState.Parse(Newtonsoft.Json.Linq.JObject.Parse("{\"version\":99,\"mod\":\"9.9.9\",\"contracts\":[]}"), out var newerBad);
+            var junk = ContractState.Parse(Newtonsoft.Json.Linq.JObject.Parse("{\"version\":1,\"waybills\":\"none\"}"), out var junkBad);
+            Line($"save: a newer format: read {newer != null}, unreadable {newerBad}; not a state: read {junk != null}, unreadable {junkBad} (each says so in the log, as an error)");
+            if (newer != null || !newerBad || junk != null || !junkBad)
+                Problem("save: a newer format or a broken state was read, or not marked unreadable");
+        }
+
+        /// <summary>
+        /// The kiosk of a player who joined a Multiplayer game (owner, 2026-11-10: "Fix,
+        /// multiplayer"; Kiosk.DeskNet, RemoteDesk), with this game as host and player at once:
+        /// what the player's side sends goes straight to the host's side and back, as bytes, in
+        /// place of the Multiplayer mod.
+        ///
+        /// - a hello with this build is answered with a snapshot; with another build, refused
+        ///   with the words for the kiosk, and the kiosk says so;
+        /// - every answer of the player's desk is the host's own: the offers in a kiosk's order,
+        ///   the railroad's contracts with their standing, volumes, raise rows, penalties and
+        ///   cars, what is owed, the notices, the shops' rows and the sales';
+        /// - what the player asks is done on the host: a contract taken and given up, a level
+        ///   lowered and kept, an end asked and taken back, a handcar bought and sold again;
+        /// - a locked offer is refused with its reason, on the list's line.
+        ///
+        /// Not checked: the Multiplayer mod's own carrying of the bytes, and a second game.
+        /// </summary>
+        private void RemoteDeskCheck(ContractRuntime rt, string id)
+        {
+            var host = KioskMenu.Desk;
+            var remote = DeskNet.Remote;
+            var inventory = SingletonBehaviour<Inventory>.Instance;
+            var player = new object();
+            var place = new KioskPlace { Id = "MF", Name = "MF" };
+            var office = new KioskPlace { Id = InterchangeYards.All().Keys.First(), IsInterchange = true, Name = "office" };
+            var sent = new List<string>();
+            if (!DeskNet.ClientReady(out var before) && before == null)
+                Problem("remote: no word for the kiosk of a player whose game has no multiplayer part");
+            DeskNet.SendToHost = (kind, data) => { sent.Add($"to host {kind} {data.Length}"); DeskNet.OnHostMessage(player, "the probe's player", kind, data); };
+            DeskNet.SendToPlayer = (to, kind, data) => { sent.Add($"to player {kind} {data.Length}"); if (ReferenceEquals(to, player)) DeskNet.OnClientMessage(kind, data); };
+            try
+            {
+                remote.Start(takeKiosk: false);
+                if (DeskNet.ClientReady(out var waiting) || waiting == null || !waiting.StartsWith("Waiting for the host"))
+                    Problem($"remote: before the host's snapshot the kiosk says '{waiting}'");
+
+                // Another build: refused, with the words for the kiosk.
+                DeskNet.SendToHost(Contracts.Core.Net.DeskWire.Hello, Contracts.Core.Net.DeskWire.Write(new Contracts.Core.Net.DeskHello { Version = "0.0.1", Protocol = Contracts.Core.Net.DeskWire.Protocol }));
+                DeskNet.ClientReady(out var refused);
+                Line($"remote: a hello from another build: ready {remote.Ready}; the kiosk says '{refused}'");
+                if (remote.Ready || refused == null || !refused.Contains("0.0.1") || !refused.Contains(Main.Version))
+                    Problem("remote: a player with another build was not refused with both versions named");
+                DeskNet.OnHostMessage(player, "the probe's player", Contracts.Core.Net.DeskWire.Request, new byte[] { 1, 2, 3 });   // not a message: no answer, no throw
+
+                // This build: a snapshot.
+                remote.Tick(10f);
+                Line($"remote: a hello from this build: ready {remote.Ready}, revision {remote.Model.Snapshot?.Revision}; {string.Join(", ", sent)}");
+                if (!remote.Ready || !DeskNet.ClientReady(out _))
+                {
+                    Problem("remote: the host did not answer this build's hello with a snapshot");
+                    return;
+                }
+
+                // Every answer is the host's.
+                var wrong = new List<string>();
+                void Same(string what, object a, object b)
+                {
+                    if (!Equals(a, b))
+                        wrong.Add($"{what}: host '{a}', player '{b}'");
+                }
+                foreach (var at in new[] { place, office, null })
+                    Same($"offers at {at?.Id ?? "no place"}", string.Join(",", host.Offers(at).Select(o => $"{o.Id}/{o.Short}/{o.Needs}")), string.Join(",", remote.Offers(at).Select(o => $"{o.Id}/{o.Short}/{o.Needs}")));
+                var mine = host.Mine();
+                Same("the railroad's contracts", string.Join(",", mine.Select(v => $"{v.Id} {ContractsScreen.Value(v)}")), string.Join(",", remote.Mine().Select(v => $"{v.Id} {ContractsScreen.Value(v)}")));
+                foreach (var v in mine)
+                {
+                    var r = remote.Mine().FirstOrDefault(x => x.Id == v.Id);
+                    if (r == null)
+                        continue;
+                    for (var level = 1; level <= 5; level++)
+                        Same($"{v.Id} volume {level}", host.Volume(v, level), remote.Volume(r, level));
+                    Same($"{v.Id} legend", host.Legend(v), remote.Legend(r));
+                    Same($"{v.Id} raise", $"{host.RaiseBlocker(v)}|{host.RaiseValue(v)}", $"{remote.RaiseBlocker(r)}|{remote.RaiseValue(r)}");
+                    for (var target = 0; target < v.Level; target++)
+                        Same($"{v.Id} penalty to {target}", host.Penalty(v, target), remote.Penalty(r, target));
+                    var (hc, rc) = (host.Cars(v), remote.Cars(r));
+                    Same($"{v.Id} cars", $"{hc?.ToMove}|{hc?.Line}|{hc?.Page}", $"{rc?.ToMove}|{rc?.Line}|{rc?.Page}");
+                }
+                var anOffer = host.Offers(place).FirstOrDefault();
+                if (anOffer != null)
+                    Same("an offer's volume and legend", $"{host.Volume(anOffer, 1)}|{host.Legend(anOffer)}", $"{remote.Volume(anOffer, 1)}|{remote.Legend(anOffer)}");
+                Same("owed", host.Owed, remote.Owed);
+                Same("notice", host.Notice, remote.Notice);
+                Same("hold", host.Hold, remote.Hold);
+                Same("jobless", host.Jobless(), remote.Jobless());
+                Same("waiting", host.Waiting(), remote.Waiting());
+                Same("day length", host.DayLength, remote.DayLength);
+                Same("money", host.Money, remote.Money);
+                Same("starts at once", host.StartsAtOnce, remote.StartsAtOnce);
+                foreach (var coaches in new[] { false, true })
+                    Same($"the shop ({(coaches ? "coaches" : "locomotives")})", string.Join(",", host.Shop(coaches, place).Select(x => $"{x.Key}/{x.Name}/{x.Price}")), string.Join(",", remote.Shop(coaches, place).Select(x => $"{x.Key}/{x.Name}/{x.Price}")));
+                Same("the sales", string.Join(",", host.Selling().Select(x => $"{x.Key}/{x.Label}/{x.Offer}/{x.Blocker}/{x.Ask}")), string.Join(",", remote.Selling().Select(x => $"{x.Key}/{x.Label}/{x.Offer}/{x.Blocker}/{x.Ask}")));
+                Line($"remote: {mine.Count} contract(s), {host.Offers(place).Count} offer(s), {host.Shop(false, place).Count} + {host.Shop(true, place).Count} shop row(s), {host.Selling().Count} sale row(s) compared: {(wrong.Count == 0 ? "the player's desk answers as the host's" : string.Join("; ", wrong.Take(6)))}");
+                if (wrong.Count > 0)
+                    Problem($"remote: {wrong.Count} answer(s) of the player's desk differ from the host's");
+
+                // What the player asks is done on the host.
+                var c = rt.State.Contracts.FirstOrDefault(x => x.Id == id);
+                var open = remote.Offers(place).FirstOrDefault(o => o.Needs == null);
+                var locked = remote.Offers(place).FirstOrDefault(o => o.Needs != null);
+                if (open != null)
+                {
+                    remote.Take(open, 1);
+                    var took = rt.State.Contracts.Any(x => x.Id == open.Id);
+                    var shown = remote.Mine().Any(x => x.Id == open.Id);
+                    remote.End(remote.Mine().First(x => x.Id == open.Id));
+                    Line($"remote: took {open.Id}: on the host {took}, at the player's kiosk {shown}; given up: on the host {!rt.State.Contracts.Any(x => x.Id == open.Id)}");
+                    if (!took || !shown || rt.State.Contracts.Any(x => x.Id == open.Id) || remote.Mine().Any(x => x.Id == open.Id))
+                        Problem("remote: a contract taken and given up at the player's kiosk was not on the host");
+                }
+                if (locked != null)
+                {
+                    KioskMenu.TakeMessage();
+                    remote.Take(locked, 1);
+                    var told = KioskMenu.TakeMessage();
+                    Line($"remote: a locked offer ({locked.Id}, '{locked.Needs}') asked for: on the host {rt.State.Contracts.Any(x => x.Id == locked.Id)}; the kiosk tells '{told}'");
+                    if (rt.State.Contracts.Any(x => x.Id == locked.Id) || told == null)
+                        Problem("remote: a locked offer was taken, or its refusal not told");
+                }
+                if (c != null && c.Level >= 2)
+                {
+                    var view = remote.Mine().First(x => x.Id == id);
+                    var level = c.Level;
+                    remote.RequestLevel(view, level - 1);
+                    var lowered = c.Requested;
+                    remote.End(remote.Mine().First(x => x.Id == id));
+                    var ending = c.Ending;
+                    remote.RequestLevel(remote.Mine().First(x => x.Id == id), level);
+                    Line($"remote: {id} at level {level}: lowering asked: the host has {lowered}; an end asked: {ending}; kept: asks {c.Requested}, ending {c.Ending}");
+                    if (lowered != level - 1 || !ending || c.Requested != level || c.Ending)
+                        Problem("remote: a level asked for, an end asked for or keeping the level at the player's kiosk was not on the host");
+                }
+
+                // A handcar bought with the railroad's cash, and sold again.
+                var cheap = remote.Shop(false, place).OrderBy(x => x.Price).FirstOrDefault();
+                if (cheap != null)
+                {
+                    inventory.AddMoney((float)cheap.Price + 1_000f);
+                    var (money, owned) = (inventory.PlayerMoney, host.Selling().Count);
+                    remote.Tick(120f);   // a hello again: the snapshot with the money
+                    KioskMenu.TakeMessage();
+                    var page = remote.Buy(false, cheap.Key, place);
+                    var bought = KioskMenu.TakeMessage();
+                    var after = host.Selling();
+                    Line($"remote: bought {cheap.Name} (${cheap.Price:N0}): the kiosk first says '{page.Split('\n')[0]}', then tells '{bought}'; money {money:N0} -> {inventory.PlayerMoney:N0}; vehicles {owned} -> {after.Count}; at the player's kiosk {remote.Selling().Count}");
+                    if (after.Count != owned + 1 || Math.Abs(money - inventory.PlayerMoney - cheap.Price) > 0.5 || bought == null || remote.Selling().Count != after.Count || Math.Abs(remote.Money - inventory.PlayerMoney) > 0.5)
+                        Problem("remote: a purchase at the player's kiosk was not made on the host with its cash, or not told and shown");
+                    var fresh = after.FirstOrDefault(x => Math.Abs(x.Offer - cheap.Price / 2) < 1 && x.Blocker == null);
+                    if (fresh != null)
+                    {
+                        remote.Sell(fresh.Key);
+                        var sold = KioskMenu.TakeMessage();
+                        Line($"remote: sold it again: vehicles {host.Selling().Count}, money {inventory.PlayerMoney:N0}; the kiosk tells '{sold}'");
+                        if (host.Selling().Count != owned || sold == null || remote.Selling().Count != owned)
+                            Problem("remote: a sale at the player's kiosk was not made on the host, or not told and shown");
+                    }
+                    else
+                        Problem("remote: the vehicle bought is not among the host's sales");
+                }
+                Line($"remote: {sent.Count} message(s), the longest {sent.Select(x => int.Parse(x.Split(' ').Last())).DefaultIfEmpty(0).Max()} bytes");
+            }
+            finally
+            {
+                remote.Stop();
+                DeskNet.OnSessionEnded();
+                if (!ReferenceEquals(KioskMenu.Desk, host))
+                {
+                    Problem("remote: the kiosk's desk was not the host's own after the check");
+                    KioskMenu.Desk = host;
+                }
+            }
+        }
+
+        /// <summary>
+        /// The contract day against the world's (Contracts.Core DayRoll; ContractRuntime.RollTo),
+        /// and the hold (the review of 2026-11-10: days missed were each scored in one tick, and a
+        /// Persistent Jobs the mod can't work with turned into penalties), on the taken contract
+        /// with a bill open:
+        ///
+        /// - four days on at once: three are skipped unscored, the bill moved on by them, and the
+        ///   last midnight alone is scored;
+        /// - the clock set back two days: the contract day follows, the bill moved back, nothing
+        ///   scored;
+        /// - on hold: the kiosk says so and takes no contract, a midnight scores nothing, charges
+        ///   nothing and moves the bill on a day; off hold, all is as before.
+        /// </summary>
+        private void RollCheck(ContractRuntime rt, string id)
+        {
+            var c = id == null ? null : rt.State.Contracts.FirstOrDefault(x => x.Id == id);
+            var inventory = SingletonBehaviour<Inventory>.Instance;
+            var desk = KioskMenu.Desk;
+            if (c == null || c.Level < 1)
+            {
+                Problem("roll: no contract at work to check");
+                return;
+            }
+            var bill = rt.State.Waybills.FirstOrDefault(w => w.Contract == id) ?? rt.State.Waybills.FirstOrDefault();
+            if (bill == null)
+            {
+                Problem("roll: no waybill to check");
+                return;
+            }
+            var day = rt.State.Day;
+            bill.Opened = day + 0.5;
+            var (scores, money) = (c.History.Count, inventory.PlayerMoney);
+            KioskMenu.TakeMessage();
+
+            rt.RollTo(day + 4);
+            Line($"roll: four days on: day {day} -> {rt.State.Day}; scored {c.History.Count - scores} time(s); the bill opened {day + 0.5:F2} -> {bill.Opened:F2}; level {c.Level}");
+            if (rt.State.Day != day + 4 || c.History.Count - scores != 1 || bill.Opened != day + 3.5)
+                Problem("roll: four days at once were not three skipped and one scored, the bill moved on by three");
+            scores = c.History.Count;
+
+            rt.RollTo(day + 2);
+            Line($"roll: the clock back two days: day {rt.State.Day}; scored {c.History.Count - scores} time(s); the bill opened {bill.Opened:F2}; service day {rt.State.ServiceDay}");
+            var served = (ContractRuntime.Now?.Hour ?? 6) >= 6 ? day + 2 : day + 1;
+            if (rt.State.Day != day + 2 || c.History.Count != scores || bill.Opened != day + 1.5 || rt.State.ServiceDay != served)
+                Problem("roll: the clock set back was not followed, the bill moved back with it, nothing scored and no service on its account");
+
+            rt.OnHold = "Persistent Jobs has changed: the probe's hold";
+            var offer = desk.Offers(new KioskPlace { Id = "MF", Name = "MF" }).FirstOrDefault();
+            var level = c.Level;
+            c.Requested = Math.Max(1, c.Level - 1);   // a lowering asked for: on hold it is neither made nor charged
+            rt.RollTo(day + 3);
+            Line($"roll: on hold: the desk says '{desk.Hold}', the notice '{desk.Notice}', an offer needs '{offer?.Needs}'; a midnight: day {rt.State.Day}, " +
+                 $"scored {c.History.Count - scores} time(s), level {c.Level}, the bill opened {bill.Opened:F2}, money {money:N0} -> {inventory.PlayerMoney:N0}, owed ${rt.State.Owed:N0}");
+            if (desk.Hold == null || desk.Notice != ContractTerms.HoldLine || (offer != null && offer.Needs != ContractTerms.HoldLine))
+                Problem("roll: on hold the kiosk does not say so, or still offers contracts");
+            if (rt.State.Day != day + 3 || c.History.Count != scores || c.Level != level || bill.Opened != day + 2.5 || Math.Abs(inventory.PlayerMoney - money) > 0.5 || rt.State.Owed > 0.5)
+                Problem("roll: on hold a midnight scored, changed a level or charged, or did not move the bill on");
+            rt.OnHold = null;
+            c.Requested = c.Level;
+            if (desk.Hold != null || desk.Notice == ContractTerms.HoldLine)
+                Problem("roll: off hold the kiosk still says on hold");
         }
 
         /// <summary>
@@ -1707,6 +2095,11 @@ namespace Contracts.Mod.Runtime
             Line($"standing: after midnight: level {c.Level}, history [{string.Join(", ", c.History)}], closed [{string.Join(", ", c.Closed)}]");
             if (c.History.Count != 1 || c.Level != level)
                 Problem("midnight did not score the day (or changed the level)");
+            // One scored day: the list says how far the raise is, and so does its row's value.
+            view = KioskMenu.Desk.Mine().First(v => v.Id == id);
+            Line($"standing: with one scored day the list shows '{ContractsScreen.Standing(view)}', the raise row '{KioskMenu.Desk.RaiseValue(view)}'");
+            if (ContractsScreen.Standing(view) != $"L{level} 1/3d" || KioskMenu.Desk.RaiseValue(view) != "1/3 days")
+                Problem("standing: the list or the raise row does not show the days toward a raise");
 
             // Three good days: the raise is offered, asked for, and granted at midnight.
             c.History.Clear();
@@ -1730,11 +2123,15 @@ namespace Contracts.Mod.Runtime
             view = KioskMenu.Desk.Mine().First(v => v.Id == id);
             KioskMenu.Desk.RequestLevel(view, c.Level + 1);
             c.Closed.Add(4.6);   // a car that took 4.6 days, delivered today
+            KioskMenu.TakeMessage();
             rt.State.Day++;
             rt.Midnight();
-            Line($"standing: raise asked, then a slow car: level {c.Level}, requested {c.Requested}, history [{string.Join(", ", c.History)}]");
+            var refusal = KioskMenu.TakeMessage();
+            Line($"standing: raise asked, then a slow car: level {c.Level}, requested {c.Requested}, history [{string.Join(", ", c.History)}]; the kiosk tells '{refusal}'");
             if (c.Level != level + 1 || c.Requested != c.Level)
                 Problem("a raise went through after the average fell under 90%");
+            if (refusal == null || !refusal.StartsWith($"{id} stays L{c.Level}: ") || refusal.Length > KioskMenu.InfoLineChars)
+                Problem("standing: the kiosk was not told the raise was refused, on one line");
         }
 
         /// <summary>
@@ -1860,25 +2257,57 @@ namespace Contracts.Mod.Runtime
                     Problem("pay: three poor days did not force two levels down with the penalty");
             });
 
-            // 4. Ending costs the penalty at once; what the wallet can't cover is owed.
+            // 4. Ending is final at midnight, and charged then (owner, 2026-11-10): asked for, the
+            //    contract goes on and nothing is charged; kept, midnight leaves it alone at no cost;
+            //    asked for again, midnight ends it with the penalty, and what the wallet can't cover
+            //    is owed.
             var owed = 0.0;
             Try("pay: ending", () =>
             {
+                c.Closed.Clear();
+                foreach (var w in rt.State.Waybills)
+                    w.Opened = null;
                 var view = KioskMenu.Desk.Mine().First(v => v.Id == id);
                 var (level, days) = (c.Level, c.History.Count);
                 var expected = ContractTerms.Penalty(level, 0, days);
                 var quoted = KioskMenu.Desk.Penalty(view, 0);
                 inventory.SetMoney(1_000);
+                KioskMenu.TakeMessage();
                 KioskMenu.Desk.End(view);
+                var asked = KioskMenu.Desk.Mine().FirstOrDefault(v => v.Id == id);
+                Line($"pay: asked to end {id} at level {level} with {days} day(s) of history: quoted ${quoted:N0} (expected ${expected:N0}); " +
+                     $"held {asked != null}, shown '{(asked == null ? null : ContractsScreen.Standing(asked))}', wallet ${inventory.PlayerMoney:N0}, owed ${rt.State.Owed:N0}");
+                if (asked == null || !asked.Ending || ContractsScreen.Standing(asked) != $"L{level} ends" || Math.Abs(quoted - expected) > 0.5
+                    || Math.Abs(inventory.PlayerMoney - 1_000) > 0.5 || rt.State.Owed > 0.5)
+                    Problem("pay: asking to end a contract ended it or charged for it before midnight");
+                if (asked == null)
+                    return;
+                // Kept: midnight changes nothing and charges nothing.
+                KioskMenu.Desk.RequestLevel(asked, level);
+                rt.State.Day++;
+                rt.Midnight();
+                var kept = KioskMenu.Desk.Mine().FirstOrDefault(v => v.Id == id);
+                Line($"pay: kept before midnight: held {kept != null}, level {kept?.Level}, ending {kept?.Ending}, wallet ${inventory.PlayerMoney:N0}, owed ${rt.State.Owed:N0}");
+                if (kept == null || kept.Ending || kept.Level != level || Math.Abs(inventory.PlayerMoney - 1_000) > 0.5 || rt.State.Owed > 0.5)
+                    Problem("pay: a contract kept before midnight was ended or charged for");
+                if (kept == null)
+                    return;
+                // Asked for again, and midnight comes.
+                KioskMenu.Desk.End(kept);
+                rt.State.Day++;
+                rt.Midnight();
                 owed = rt.State.Owed;
+                var told = KioskMenu.TakeMessage();
                 var data = SaveGameManager.MakeEmptySave();
                 rt.State.Write(data);
                 var back = ContractState.Read(data, out _);
-                Line($"pay: ended {id} at level {level} with {days} day(s) of history: quoted ${quoted:N0} (expected ${expected:N0}); " +
-                     $"wallet ${inventory.PlayerMoney:N0}, owed ${owed:N0} (the desk shows ${KioskMenu.Desk.Owed:N0}); the save reads back owed ${back?.Owed ?? -1:N0}");
-                if (rt.State.Contracts.Any(x => x.Id == id) || Math.Abs(quoted - expected) > 0.5 || inventory.PlayerMoney > 0.5
+                Line($"pay: ended {id} at midnight: wallet ${inventory.PlayerMoney:N0}, owed ${owed:N0} (the desk shows ${KioskMenu.Desk.Owed:N0}); " +
+                     $"the save reads back owed ${back?.Owed ?? -1:N0}; the kiosk tells '{told}'");
+                if (rt.State.Contracts.Any(x => x.Id == id) || inventory.PlayerMoney > 0.5
                     || Math.Abs(owed - (expected - 1_000)) > 0.5 || back == null || Math.Abs(back.Owed - owed) > 0.5)
-                    Problem("pay: ending did not take the wallet and owe the rest of the penalty");
+                    Problem("pay: midnight did not end the contract, take the wallet and owe the rest of the penalty");
+                if (told == null || !told.Contains($"{id} ended"))
+                    Problem("pay: the kiosk was not told the contract ended");
             });
             if (owed > 0.5)
             {
@@ -2064,6 +2493,34 @@ namespace Contracts.Mod.Runtime
             Fit("the longest info line", detailLines.Info);
             detailLines.Info.text = info0;
 
+            // 3b. A raise not yet to be had: its row says how far it is, and the info line why while
+            //     the row is highlighted, then the screen's own line again.
+            var rows = x.Detail.Shown().ToList();
+            var raiseAt = rows.FindIndex(r => r.StartsWith("Raise to level"));
+            var why = desk.RaiseBlocker(mine);
+            if (raiseAt > 0 && why != null)
+            {
+                for (var i = 0; i < raiseAt; i++)
+                {
+                    kiosk.HandleInput(InputAction.Down);
+                    yield return null;
+                }
+                var onRaise = detailLines.Info.text;
+                Fit("the raise row", detailLines.Rows[raiseAt].Id, detailLines.Rows[raiseAt].Value);
+                Fit("the raise row's reason", detailLines.Info);
+                yield return Shot("raise");
+                for (var i = 0; i < raiseAt; i++)
+                {
+                    kiosk.HandleInput(InputAction.Up);
+                    yield return null;
+                }
+                Line($"cars: the raise row '{rows[raiseAt]}': the info line on it '{onRaise}', back on Cars '{detailLines.Info.text}'");
+                if (onRaise != why || rows[raiseAt].EndsWith("[locked]") || detailLines.Info.text != info0)
+                    Problem("cars: the raise row does not say how far it is, or the info line not why while it is highlighted");
+            }
+            else
+                Line($"cars: no blocked raise row to check ({(why == null ? "the raise is allowed" : "no row")})");
+
             // 4. The Cars page: confirm on the Cars row.
             var infoScreen = kiosk.GetComponentInChildren<CareerManagerInfoScreen>(true);
             kiosk.HandleInput(InputAction.Confirm);
@@ -2095,6 +2552,42 @@ namespace Contracts.Mod.Runtime
             yield return null;
             if (!ReferenceEquals(kiosk.CurrentScreen, x.Detail))
                 Problem($"cars: confirm on the Cars page went to {kiosk.CurrentScreen?.GetType().Name}, not back to the contract");
+            // 4b. Penalties owed: a row of their own on the list, with the sum, and a page.
+            // With no cash, or the debt is paid from it within a tick.
+            var owedBefore = rt.State.Owed;
+            var wallet = SingletonBehaviour<Inventory>.Instance;
+            var cashBefore = wallet.PlayerMoney;
+            wallet.SetMoney(0);
+            rt.State.Owed = 44_000;
+            kiosk.SetActiveDisplay(main);
+            yield return null;
+            kiosk.SetActiveDisplay(x.List);
+            yield return null;
+            var owedAt = x.List.Entries.ToList().FindIndex(e => e.Id == RuntimeDesk.OwedId);
+            Line($"owed: row {(owedAt < 0 ? "none" : $"{owedAt + 1} '{x.List.Entries[owedAt].Short}' [{ContractsScreen.Value(x.List.Entries[owedAt])}]")}");
+            if (owedAt < 0 || ContractsScreen.Value(x.List.Entries[owedAt]) != "$44,000")
+                Problem("owed: no Penalties owed row with the sum");
+            else
+            {
+                for (var i = 0; i < owedAt; i++)
+                {
+                    kiosk.HandleInput(InputAction.Down);
+                    yield return null;
+                }
+                yield return Shot("owed");
+                kiosk.HandleInput(InputAction.Confirm);
+                yield return null;
+                yield return null;
+                var owedText = infoScreen.paragraph.text ?? "";
+                Line($"owed: page '{infoScreen.title.text}':\n{owedText}");
+                if (!ReferenceEquals(kiosk.CurrentScreen, infoScreen) || !owedText.StartsWith("You owe $44,000"))
+                    Problem("owed: confirm on the row did not open its page");
+                kiosk.HandleInput(InputAction.Confirm);
+                yield return null;
+            }
+            rt.State.Owed = owedBefore;
+            wallet.SetMoney(cashBefore);
+
             // 5. The day length's row and page (Vertigo75, Nexus, 2026-11-09): the clone's days are the presets' 2 h.
             kiosk.SetActiveDisplay(main);
             yield return null;
@@ -2310,6 +2803,21 @@ namespace Contracts.Mod.Runtime
                 yield return null;
                 Timed($"choosing take at level 1 ({offer.Short})", Ms(() => kiosk.HandleInput(InputAction.Confirm)));
                 yield return null;
+                if (n == 0)
+                {
+                    // The question, with how to sleep through the wait: all of it on the confirm screen.
+                    // The confirm screen writes on the kiosk's own text lines, not on children of its own.
+                    var asked = kiosk.GetComponentsInChildren<TMPro.TMP_Text>(true)
+                        .FirstOrDefault(m => m.gameObject.activeInHierarchy && (m.text ?? "").Contains("Sleep Cooldown"));
+                    asked?.ForceMeshUpdate();
+                    Line($"kiosk load: the take question: {(asked == null ? "not found" : $"'{asked.text}', {asked.textInfo?.lineCount} line(s), overflowing {asked.isTextOverflowing}, truncated {asked.isTextTruncated}")}");
+                    if (asked == null || asked.isTextTruncated || !asked.text.Contains(ContractTerms.SleepHint) || !asked.text.EndsWith("ending it later costs up to $45,000."))
+                        Problem("kiosk load: the take question does not show how to sleep through the wait and what backing out costs, in full");
+                    var shotAt = kiosk.transform.TransformPoint(new Vector3(-0.10f, 1.32f, -0.08f));
+                    var toward = kiosk.transform.TransformDirection(Vector3.left);
+                    toward.y = 0f;
+                    yield return Capture("probe-take-question", shotAt + toward.normalized * 0.55f, shotAt);
+                }
                 Timed($"confirming the take ({offer.Short})", Ms(() => kiosk.HandleInput(InputAction.Confirm)));
                 yield return null;
                 if (!rt.State.Contracts.Any(c => c.Id == offer.Id) || !ReferenceEquals(kiosk.CurrentScreen, x.List))
@@ -2323,6 +2831,24 @@ namespace Contracts.Mod.Runtime
                     desk.Take(offer, 1);
                 rt.State.Day++;
                 Timed("midnight with every contract newly taken", Ms(() => rt.Midnight()));
+                // The bridge is a later contract: offered once one of the player's is at level 3.
+                var lead = rt.State.Contracts.FirstOrDefault(c => c.Level >= 1 && c.Id != Economy.BridgeId);
+                if (lead != null && rt.State.Contracts.All(c => c.Id != Economy.BridgeId))
+                {
+                    lead.Level = lead.Requested = 3;
+                    var bridge = desk.Offers(place).FirstOrDefault(o => o.Id == Economy.BridgeId);
+                    Line($"kiosk load: with {lead.Id} at level 3 the bridge offer {(bridge == null ? "is gone" : bridge.Needs == null ? "can be taken" : $"needs '{bridge.Needs}'")}");
+                    if (bridge == null || bridge.Needs != null)
+                        Problem("kiosk load: the bridge is not offered with a contract at level 3");
+                    else
+                    {
+                        desk.Take(bridge, 1);
+                        var b = rt.State.Contracts.FirstOrDefault(c => c.Id == Economy.BridgeId);
+                        if (b != null)
+                            b.Level = b.Requested = 1;
+                    }
+                    lead.Level = lead.Requested = 1;
+                }
                 // The 06:00 service as the game runs it: begun now, then a step a frame.
                 Timed("the 06:00 service begun (the sweep, the plan, the bills)", Ms(() => rt.BeginService(serviceDay + 3)));
                 // The check below, in the same frame, before the first step (it is in the first frame's time, not the service's).
@@ -2446,10 +2972,129 @@ namespace Contracts.Mod.Runtime
                 var at = kiosk.transform.TransformPoint(new Vector3(-0.10f, 1.32f, -0.08f));
                 yield return Capture("probe-cars-list-all", at + facing * 0.55f, at);
             }
+            var listed = x.List.Entries.ToList();
             kiosk.SetActiveDisplay(main);
             Line($"kiosk load: {(slow.Count == 0 ? "nothing slow" : "slow: " + string.Join("; ", slow))}");
             if (slow.Count > 0)
                 Problem("kiosk load: " + string.Join("; ", slow));
+            Try("retry", () => RetryCheck(rt, listed));
+            yield return new WaitForSeconds(2f);
+        }
+
+        /// <summary>
+        /// The service again for the cars it had no room for (owner, 2026-11-10: "if an interchange
+        /// is full it needs to attempt serving again later"; Contracts.Core ServiceRetry), after
+        /// the service with every contract held, which the interchanges can't take whole:
+        ///
+        /// - what it was short of waits, with a time for the next try no more than 2.5 game hours
+        ///   off; the kiosk's list has a "Waiting for room" row with the count, and its page;
+        /// - a save holds the waiting orders and the time;
+        /// - with one interchange track's cars set out for pickup, the retry takes them away,
+        ///   places waiting cars on the track, bills them and writes jobs, and what is left waits
+        ///   for the next try.
+        ///
+        /// Not checked here: the retry coming by itself when its time comes (Tick), and the next
+        /// day's service dropping what still waits.
+        /// </summary>
+        private void RetryCheck(ContractRuntime rt, List<ContractView> listed)
+        {
+            var desk = KioskMenu.Desk;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var last = rt.LastService;
+            var shortBefore = last?.Orders.Sum(r => r.Order.Count - r.Cars.Count) ?? -1;
+            var before = rt.State.Waiting.Sum(w => w.Count);
+            var clock = ContractRuntime.Clock;
+            var (cars, page) = desk.Waiting();
+            var row = listed.FirstOrDefault(e => e.Id == Runtime.RuntimeDesk.WaitingId);
+            Line($"retry: the last service was {shortBefore} car(s) short; {before} wait ({string.Join(", ", rt.State.Waiting.GroupBy(w => w.Interchange).Select(g => $"{g.Sum(w => w.Count)} at {g.Key}"))}); " +
+                 $"clock {clock:F4}, again at {rt.State.RetryAt:F4}; the list's row: {(row == null ? "none" : $"'{row.Short}' [{ContractsScreen.Value(row)}]")}; the page:\n{page}");
+            if (before == 0)
+            {
+                Problem("retry: the service with every contract held left no car waiting, so the retry was not checked");
+                return;
+            }
+            if (before > shortBefore)
+                Problem($"retry: {before} car(s) wait, more than the {shortBefore} the service was short of");
+            if (rt.State.RetryAt == null || clock == null || rt.State.RetryAt.Value - clock.Value > ServiceRetry.Hours / 24.0 + 1e-6)
+                Problem("retry: no time for the next try within 2.5 game hours");
+            if (cars != before || page == null || !page.StartsWith("New cars wait off the map"))
+                Problem("retry: the desk does not say how many cars wait");
+            if (row == null || ContractsScreen.Value(row) != before.ToString())
+                Problem("retry: the kiosk's list has no Waiting for room row with the count");
+
+            var data = SaveGameManager.MakeEmptySave();
+            rt.State.Write(data);
+            var back = ContractState.Read(data, out _);
+            Line($"retry: the save reads back {back?.Waiting.Sum(w => w.Count) ?? -1} waiting, again at {back?.RetryAt:F4}");
+            if (back == null || back.Waiting.Sum(w => w.Count) != before || back.RetryAt != rt.State.RetryAt)
+                Problem("retry: the save does not hold the waiting cars and the next try's time");
+
+            // Room: one interchange track's cars, all contract cars, set out for pickup (their jobs withdrawn).
+            var (freed, standing) = MakeRoom(rt, rt.State.Waiting.Select(w => w.Interchange).Distinct());
+            if (freed == null)
+            {
+                Problem("retry: no interchange track with only contract cars on it to make room on");
+                return;
+            }
+            var summary = rt.Retry();
+            var run = rt.LastService;
+            var after = rt.State.Waiting.Sum(w => w.Count);
+            var fresh = run?.Orders.SelectMany(r => r.Cars).Where(c => c != null).ToList() ?? new List<TrainCar>();
+            var unbilled = fresh.Count(c => rt.State.Of(c.logicCar.carGuid) == null);
+            var jobless = fresh.Count(c => jobs.GetJobOfCar(c.logicCar) == null);
+            var onFreed = fresh.Count(c => c.logicCar.FrontBogieTrack == freed);
+            Line($"retry: {standing.Count} car(s) on {freed.ID.FullDisplayID} set out; {summary}");
+            Line($"retry: {fresh.Count} new car(s), {onFreed} on {freed.ID.FullDisplayID}, {unbilled} without a bill, {jobless} without a job; " +
+                 $"{after} still wait, again at {rt.State.RetryAt:F4}; cuts: {string.Join(", ", run?.Cuts ?? new List<string>())}");
+            if (run == null || !run.Retry || run.Taken < standing.Count)
+                Problem("retry: the cars set out for pickup were not taken away");
+            if (fresh.Count == 0 || onFreed == 0)
+                Problem("retry: no waiting car was placed on the track made free");
+            if (after != before - fresh.Count)
+                Problem($"retry: {after} car(s) wait after {fresh.Count} of {before} were placed");
+            if (unbilled > 0 || (fresh.Count > 0 && run.Made == 0))
+                Problem("retry: the new cars were not all billed, or got no job");
+            if (after > 0 && rt.State.RetryAt == null)
+                Problem("retry: cars still wait with no next try");
+
+            // A cut that throws (the probe's fault) does not end the service: the cars it could not
+            // place wait, the jobs are written and the summary comes, saying a part failed.
+            var (again, _) = MakeRoom(rt, rt.State.Waiting.Select(w => w.Interchange).Distinct());
+            if (again == null)
+            {
+                Problem("fault: no interchange track to make room on");
+                return;
+            }
+            var waitingBefore = rt.State.Waiting.Sum(w => w.Count);
+            ContractRuntime.FailNextCut = true;
+            var faulted = rt.Retry();
+            var faultRun = rt.LastService;
+            Line($"fault: a cut that throws, on {again.ID.FullDisplayID}: {faulted}");
+            Line($"fault: the service ended {!rt.Servicing}, {faultRun?.Failed} part(s) failed, {faultRun?.Placed} placed; {rt.State.Waiting.Sum(w => w.Count)} of {waitingBefore} still wait, again at {rt.State.RetryAt:F4}");
+            if (ContractRuntime.FailNextCut || rt.Servicing || faultRun == null || !faultRun.Retry || faultRun.Failed < 1 || faulted == null || !faulted.Contains("failed"))
+                Problem("fault: a cut that throws was not survived with a summary that says so");
+            if (rt.State.Waiting.Sum(w => w.Count) == 0 || rt.State.RetryAt == null)
+                Problem("fault: the cars the failed cut left were not kept waiting for the next try");
+            ContractRuntime.FailNextCut = false;
+        }
+
+        /// <summary>Makes room at one of the interchanges: a track with only contract cars on it, their jobs withdrawn and the cars set out for pickup. The track and its cars, or nulls.</summary>
+        private static (Track Track, List<Car> Cars) MakeRoom(ContractRuntime rt, IEnumerable<string> interchanges)
+        {
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            foreach (var name in interchanges)
+                foreach (var track in InterchangeYards.Tracks(name))
+                {
+                    var on = track.GetCarsFullyOnTrack().Concat(track.GetCarsPartiallyOnTrack()).Distinct().ToList();
+                    if (on.Count == 0 || on.Any(c => rt.State.Of(c.carGuid) == null))
+                        continue;
+                    foreach (var job in on.Select(c => jobs.GetJobOfCar(c)).Where(j => j != null).Distinct().ToList())
+                        ContractRuntime.Withdraw(job);
+                    foreach (var c in on)
+                        rt.State.Of(c.carGuid).Stage = Stage.OffMap;
+                    return (track, on);
+                }
+            return (null, null);
         }
 
         /// <summary>

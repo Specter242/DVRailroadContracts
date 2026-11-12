@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The mod's Multiplayer part: the kiosk's Contracts menu for players who joined
+       (Contracts.Mod Kiosk/DeskNet). Compiled against the Multiplayer mod's API and loaded by
+       Contracts.dll only when Multiplayer runs. Ships beside Contracts.dll. -->
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>Contracts.Multiplayer</AssemblyName>
+    <RootNamespace>Contracts.Multiplayer</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+    <!-- Compiled against only: the Multiplayer mod ships the API at runtime, and refuses to
+         load if another copy is loaded first. Never packaged. -->
+    <PackageReference Include="DVMultiplayerAPI" Version="1.1.0" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Contracts.Mod/Contracts.Mod.csproj" Private="false" />
+  </ItemGroup>
+
+  <!-- Game and loader assemblies are referenced in place and never copied. -->
+  <ItemGroup>
+    <Reference Include="UnityModManager" HintPath="$(DvModManagerDir)/UnityModManager.dll" Private="false" />
+    <Reference Include="Assembly-CSharp" HintPath="$(DvManagedDir)/Assembly-CSharp.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(DvManagedDir)/UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(DvManagedDir)/UnityEngine.CoreModule.dll" Private="false" />
+  </ItemGroup>
+
+  <!-- Beside Contracts.dll, where the mod loads it from and the package and the probe take it. -->
+  <Target Name="CopyBesideMod" AfterTargets="Build">
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(MSBuildThisFileDirectory)../Contracts.Mod/bin/$(Configuration)/$(TargetFramework)" />
+  </Target>
+
+</Project>

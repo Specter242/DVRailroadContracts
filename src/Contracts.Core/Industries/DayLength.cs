@@ -31,7 +31,8 @@ namespace Contracts.Core.Industries
                    "The built-in presets can't be changed. A custom preset works in a career once your profile has unlocked " +
                    "the Train Length 1 or Concurrent Jobs 1 license, in any career.\n\n" +
                    "Sleeping skips time: it ages your contracts' waybills and uses up the bonus time of the jobs you've taken. " +
-                   "Sleep while you wait for the 06:00 cars, not with jobs under way.";
+                   "Sleep while you wait for the 06:00 cars, not with jobs under way. With Sleep Cooldown at Can always sleep " +
+                   "in the preset, you can sleep whenever you like.";
         }
 
         private static bool Short(double minutes) => minutes > 0.0 && minutes < FullDayMinutes - 1.0;

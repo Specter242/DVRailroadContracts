@@ -6,8 +6,7 @@ namespace Contracts.Core.Industries
 {
     /// <summary>
     /// A held contract's performance, and when it may be raised (owner, 2026-11-02: "gate
-    /// upgrading contracts to performance, consistent performance"). After Railroader, as the
-    /// core's <c>OpsEngine</c> keeps it:
+    /// upgrading contracts to performance, consistent performance"). After Railroader:
     ///
     /// - **A bill** is open from when a car is billed for a move until the move is done: an
     ///   empty from its order until it is loaded at the shipper, a load from its loading (or
@@ -69,6 +68,38 @@ namespace Contracts.Core.Industries
             if (average <= RaiseAverage)
                 return $"Needs over {RaiseAverage * 100:0}%; {Math.Floor(average * 100):0}% in {days} days";
             return null;
+        }
+
+        /// <summary>
+        /// How far a contract is toward the days a raise needs, for the kiosk's narrow columns
+        /// ("2/3d"), or null once it has them, at level 5, or before it starts (captain75tur,
+        /// Nexus, 2026-11-10: "L1 %100. how can i L2").
+        /// </summary>
+        public static string RaiseDaysShort(int level, int days) =>
+            level < 1 || level >= 5 || days >= RaiseDays ? null : $"{Math.Max(0, days)}/{RaiseDays}d";
+
+        /// <summary>
+        /// A blocked raise's row value, at most 12 characters: the days so far ("2/3 days"), or
+        /// that the average is short ("needs >90%"); null if it may be raised.
+        /// </summary>
+        public static string RaiseBlockedValue(int level, IReadOnlyCollection<double> history)
+        {
+            if (RaiseBlocker(level, history) == null)
+                return null;
+            var days = history?.Count ?? 0;
+            return level < 1 || level >= 5 ? "locked" : days < RaiseDays ? $"{days}/{RaiseDays} days" : $"needs >{RaiseAverage * 100:0}%";
+        }
+
+        /// <summary>
+        /// The kiosk's words when midnight refuses a raise the player asked for: the contract
+        /// stays at its level, and why, short enough for the info line with a short id.
+        /// </summary>
+        public static string RaiseRefused(string id, int level, IReadOnlyCollection<double> history)
+        {
+            var days = history?.Count ?? 0;
+            return days < RaiseDays
+                ? $"{id} stays L{level}: {days} of {RaiseDays} days"
+                : $"{id} stays L{level}: {Math.Floor(history.Average() * 100):0}%, needs over {RaiseAverage * 100:0}%";
         }
     }
 }
