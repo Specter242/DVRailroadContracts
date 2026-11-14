@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 (2026-11-12)
+
+- In multiplayer, a job turned in by a player who joined is paid straight into the railroad's cash. Before, its banknotes came out in the host's game, where that player couldn't take them.
+
 ## 0.2.0 (2026-11-11)
 
 - A career's first contract starts as you take it, and its first cars come right away. Later contracts still start at midnight. A contract given up before its first midnight costs nothing.

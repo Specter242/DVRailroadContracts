@@ -312,6 +312,28 @@ namespace Contracts.Mod.Kiosk
 
         public static bool IsClient => Now == Role.Client;
 
+        /// <summary>
+        /// Whether this game hosts a session others can join: the host, and not Multiplayer's own
+        /// single-player session. If the API can't say which it is, a host is taken to host others.
+        /// </summary>
+        public static bool HostsOthers
+        {
+            get
+            {
+                if (Now != Role.Host)
+                    return false;
+                try
+                {
+                    var instance = AccessTools.TypeByName("MPAPI.MultiplayerAPI")?.GetProperty("Instance")?.GetValue(null);
+                    return !(Face("IMultiplayerAPI")?.GetProperty("IsSinglePlayer")?.GetValue(instance) as bool? ?? false);
+                }
+                catch (Exception)
+                {
+                    return true;
+                }
+            }
+        }
+
         private static bool positionsLooked, positionsFailed;
         private static PropertyInfo server, players, position, loaded;
 

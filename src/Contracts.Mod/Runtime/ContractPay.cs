@@ -2,11 +2,13 @@ using System;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using Contracts.Core.Industries;
+using Contracts.Core.Net;
 using DV.InventorySystem;
 using DV.Logic.Job;
 using DV.ThingTypes;
 using DV.Utils;
 using HarmonyLib;
+using UnityEngine;
 
 namespace Contracts.Mod.Runtime
 {
@@ -19,6 +21,8 @@ namespace Contracts.Mod.Runtime
     ///   it has been due. The validator prints it with the job's time bonus.
     /// - **A penalty** comes out of the wallet. The game keeps no negative cash, so what the
     ///   wallet can't cover is owed (saved), and taken as cash comes in.
+    /// - **A joined player's turn-in** in a Multiplayer session is paid straight into the
+    ///   railroad's cash by the host's game, not in banknotes (Contracts.Core GuestPay).
     /// </summary>
     internal static class ContractPay
     {
@@ -119,6 +123,54 @@ namespace Contracts.Mod.Runtime
                 catch (Exception e)
                 {
                     Main.Error($"contracts: the quick-delivery bonus for {job?.ID} failed (none paid): {e.Message}");
+                }
+            }
+        }
+
+#if DEVTOOLS
+        /// <summary>The probe's: payments are taken as a joined player's turn-ins, on a host whose player is elsewhere.</summary>
+        internal static bool AsGuestTurnIn;
+#endif
+
+        /// <summary>
+        /// The validator prints a done job's pay as banknotes. On the host of a Multiplayer
+        /// session a joined player's turn-in runs here too, in the host's copy of the office
+        /// where that player stands, and the banknotes come out where they can't take them. Such
+        /// a job's wage goes straight into the railroad's cash, which Multiplayer shows to all
+        /// (GuestPay: a turn-in at an office the host's own player is not in). Anything else,
+        /// and any failure here, leaves the game to pay as it does.
+        /// </summary>
+        [HarmonyPatch(typeof(MoneyPrinterJobValidator), nameof(MoneyPrinterJobValidator.PrintPayment))]
+        private static class GuestTurnIn
+        {
+            private static bool Prefix(MoneyPrinterJobValidator __instance, Job job)
+            {
+                var paid = false;
+                try
+                {
+                    var hosts = Kiosk.Multiplayer.HostsOthers;
+                    var me = PlayerManager.PlayerTransform;
+                    var away = me != null && __instance != null
+                        ? (double?)Vector3.Distance(me.position, __instance.transform.position) : null;
+#if DEVTOOLS
+                    if (AsGuestTurnIn)
+                        (hosts, away) = (true, null);
+#endif
+                    var inventory = SingletonBehaviour<Inventory>.Instance;
+                    if (job == null || inventory == null || !GuestPay.Direct(hosts, away))
+                        return true;
+                    var wage = (double)job.GetWageForTheJob();
+                    if (wage > 0.0)
+                        inventory.AddMoney(wage);
+                    paid = true;
+                    Main.Log($"contracts: job {job.ID} was turned in by a player who joined ({(away.HasValue ? $"the host is {away.Value:N0} m away" : "the host's place not known")}): " +
+                             $"its ${wage:N0} went straight into the railroad's cash");
+                    return false;
+                }
+                catch (Exception e)
+                {
+                    Main.Error($"contracts: paying {job?.ID} straight into the cash failed{(paid ? "" : " (the game pays it in banknotes)")}: {e.Message}");
+                    return !paid;
                 }
             }
         }

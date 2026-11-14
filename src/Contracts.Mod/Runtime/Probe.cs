@@ -2210,6 +2210,53 @@ namespace Contracts.Mod.Runtime
                 });
             }
 
+            // 1b. A joined player's turn-in is paid straight into the cash; any other comes out in banknotes, as stock.
+            var printer = job == null || job.State != JobState.Completed ? null : UnityEngine.Object.FindObjectOfType<MoneyPrinterJobValidator>();
+            if (job != null && before != null && printer == null)
+                Problem("pay: no done job or no validator to check a joined player's turn-in");
+            if (printer != null)
+            {
+                var notes = HarmonyLib.Traverse.Create(printer).Field("lastPaymentMoney");
+                var wage = (double)job.GetWageForTheJob();
+                var money = inventory.PlayerMoney;
+                ContractPay.AsGuestTurnIn = true;
+                try
+                {
+                    printer.PrintPayment(job);
+                }
+                catch (Exception e)
+                {
+                    Problem($"pay: a joined player's turn-in threw: {e}");
+                }
+                ContractPay.AsGuestTurnIn = false;
+                var paidIn = inventory.PlayerMoney - money;
+                yield return new WaitForSeconds(4.5f);
+                var printed = notes.GetValue<GameObject>();
+                Line($"pay: {job.ID} turned in as by a joined player: wage ${wage:N0}, cash {money:N0} -> {money + paidIn:N0} at once, banknotes printed: {printed != null}");
+                if (wage < 1.0 || Math.Abs(paidIn - wage) > 0.5 || printed != null || Math.Abs(inventory.PlayerMoney - money - wage) > 0.5)
+                    Problem("pay: a joined player's turn-in was not paid straight into the cash, once, without banknotes");
+
+                money = inventory.PlayerMoney;
+                var hosts = Kiosk.Multiplayer.HostsOthers;
+                try
+                {
+                    printer.PrintPayment(job);
+                }
+                catch (Exception e)
+                {
+                    Problem($"pay: the game's own payment threw: {e}");
+                }
+                yield return new WaitForSeconds(4.5f);
+                printed = notes.GetValue<GameObject>();
+                Line($"pay: {job.ID} turned in here ({Kiosk.Multiplayer.Describe()}; hosts others: {hosts}): banknotes printed: {printed != null}, cash {money:N0} -> {inventory.PlayerMoney:N0}");
+                if (hosts)
+                    Problem("pay: this game is taken to host others");
+                else if (printed == null || Math.Abs(inventory.PlayerMoney - money) > 0.5)
+                    Problem("pay: a turn-in outside a hosted session was not left to the game's banknotes");
+                if (printed != null)
+                    UnityEngine.Object.Destroy(printed);
+            }
+
             // 2. Lowering costs the penalty when it takes effect at midnight.
             Try("pay: lowering", () =>
             {
