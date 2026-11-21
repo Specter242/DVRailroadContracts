@@ -268,7 +268,25 @@ namespace Contracts.Mod.Kiosk
         private static Type Face(string name) =>
             AccessTools.TypeByName("MPAPI.Interfaces." + name) ?? AccessTools.TypeByName("MPAPI." + name);
 
+        private static bool apiLooked;
+        private static Type apiType, apiFace;
+        private static PropertyInfo apiInstance, isConnected, isHost, isSinglePlayer;
         private static bool roleSaid;
+
+        private static void EnsureApi()
+        {
+            if (apiLooked)
+                return;
+            apiLooked = true;
+            apiType = AccessTools.TypeByName("MPAPI.MultiplayerAPI");
+            if (apiType == null)
+                return;
+            apiInstance = apiType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+            apiFace = Face("IMultiplayerAPI");
+            isConnected = apiFace?.GetProperty("IsConnected");
+            isHost = apiFace?.GetProperty("IsHost");
+            isSinglePlayer = apiFace?.GetProperty("IsSinglePlayer");
+        }
 
         public static Role Now
         {
@@ -276,13 +294,10 @@ namespace Contracts.Mod.Kiosk
             {
                 try
                 {
-                    var api = AccessTools.TypeByName("MPAPI.MultiplayerAPI");
-                    if (api == null)
+                    EnsureApi();
+                    if (apiType == null)
                         return Role.None;
-                    var face = Face("IMultiplayerAPI");
-                    var connected = face?.GetProperty("IsConnected");
-                    var host = face?.GetProperty("IsHost");
-                    if (connected == null || host == null)
+                    if (isConnected == null || isHost == null)
                     {
                         if (!roleSaid)
                         {
@@ -291,12 +306,12 @@ namespace Contracts.Mod.Kiosk
                         }
                         return Role.Unknown;
                     }
-                    var instance = api.GetProperty("Instance")?.GetValue(null);
+                    var instance = apiInstance?.GetValue(null);
                     if (instance == null)
                         return Role.None;
-                    if (!(connected.GetValue(instance) as bool? ?? false))
+                    if (!(isConnected.GetValue(instance) as bool? ?? false))
                         return Role.None;
-                    return (host.GetValue(instance) as bool? ?? false) ? Role.Host : Role.Client;
+                    return (isHost.GetValue(instance) as bool? ?? false) ? Role.Host : Role.Client;
                 }
                 catch (Exception e)
                 {
@@ -324,8 +339,10 @@ namespace Contracts.Mod.Kiosk
                     return false;
                 try
                 {
-                    var instance = AccessTools.TypeByName("MPAPI.MultiplayerAPI")?.GetProperty("Instance")?.GetValue(null);
-                    return !(Face("IMultiplayerAPI")?.GetProperty("IsSinglePlayer")?.GetValue(instance) as bool? ?? false);
+                    var instance = apiInstance?.GetValue(null);
+                    if (instance == null)
+                        return false;
+                    return !(isSinglePlayer?.GetValue(instance) as bool? ?? false);
                 }
                 catch (Exception)
                 {
@@ -350,7 +367,8 @@ namespace Contracts.Mod.Kiosk
                 if (!positionsLooked)
                 {
                     positionsLooked = true;
-                    server = AccessTools.TypeByName("MPAPI.MultiplayerAPI")?.GetProperty("Server", BindingFlags.Public | BindingFlags.Static);
+                    EnsureApi();
+                    server = apiType?.GetProperty("Server", BindingFlags.Public | BindingFlags.Static);
                     players = Face("IServer")?.GetProperty("Players");
                     var player = Face("IPlayer");
                     position = player?.GetProperty("Position");
@@ -378,15 +396,13 @@ namespace Contracts.Mod.Kiosk
 
         public static string Describe()
         {
-            var api = AccessTools.TypeByName("MPAPI.MultiplayerAPI");
-            var face = Face("IMultiplayerAPI");
-            var instance = api?.GetProperty("Instance")?.GetValue(null);
-            if (face == null && api != null)
+            EnsureApi();
+            var instance = apiInstance?.GetValue(null);
+            if (apiFace == null && apiType != null)
                 return "loaded, its API not readable";
-            if (instance == null || face == null)
-                return api == null ? "not loaded" : "loaded, no instance";
-            return string.Join(", ", new[] { "IsConnected", "IsHost", "IsSinglePlayer" }
-                .Select(p => $"{p} {face.GetProperty(p)?.GetValue(instance)}"));
+            if (instance == null || apiFace == null)
+                return apiType == null ? "not loaded" : "loaded, no instance";
+            return $"IsConnected {isConnected?.GetValue(instance)}, IsHost {isHost?.GetValue(instance)}, IsSinglePlayer {isSinglePlayer?.GetValue(instance)}";
         }
     }
 }

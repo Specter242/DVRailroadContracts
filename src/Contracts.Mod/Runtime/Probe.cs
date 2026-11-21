@@ -17,6 +17,7 @@ using DV.ThingTypes.TransitionHelpers;
 using DV.Utils;
 using HarmonyLib;
 using UnityEngine;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Runtime
 {
@@ -937,7 +938,7 @@ namespace Contracts.Mod.Runtime
                         var shown = x.Detail.Shown().ToList();
                         Line($"sale: the kiosk's Sell vehicles: {string.Join("; ", shown)}");
                         var mine = VehicleSales.Owned().FirstOrDefault(u => u.Cars.Contains(f));
-                        if (mine == null || !shown.Any(s => s.StartsWith(mine.Label) && s.Contains($"${mine.Offer:N0}")))
+                        if (mine == null || !shown.Any(s => s.StartsWith(mine.Label) && s.Contains(Invariant($"${mine.Offer:N0}"))))
                             Problem("sale: the kiosk does not offer the DE2 just bought at its price");
                         kiosk.SetActiveDisplay(x.List);
                         kiosk.SetActiveDisplay(main);
@@ -1868,15 +1869,21 @@ namespace Contracts.Mod.Runtime
                 if (DeskNet.ClientReady(out var waiting) || waiting == null || !waiting.StartsWith("Waiting for the host"))
                     Problem($"remote: before the host's snapshot the kiosk says '{waiting}'");
 
-                // Another build: refused, with the words for the kiosk.
+                // Another build: refused, with the words for the kiosk, and stops retrying hello.
                 DeskNet.SendToHost(Contracts.Core.Net.DeskWire.Hello, Contracts.Core.Net.DeskWire.Write(new Contracts.Core.Net.DeskHello { Version = "0.0.1", Protocol = Contracts.Core.Net.DeskWire.Protocol }));
                 DeskNet.ClientReady(out var refused);
                 Line($"remote: a hello from another build: ready {remote.Ready}; the kiosk says '{refused}'");
                 if (remote.Ready || refused == null || !refused.Contains("0.0.1") || !refused.Contains(Main.Version))
                     Problem("remote: a player with another build was not refused with both versions named");
+                var sentWhileRefused = sent.Count;
+                remote.Tick(10f);
+                if (sent.Count != sentWhileRefused)
+                    Problem("remote: a refused player kept sending hello");
                 DeskNet.OnHostMessage(player, "the probe's player", Contracts.Core.Net.DeskWire.Request, new byte[] { 1, 2, 3 });   // not a message: no answer, no throw
 
-                // This build: a snapshot.
+                // A new session with this build: a snapshot.
+                remote.Stop();
+                remote.Start(takeKiosk: false);
                 remote.Tick(10f);
                 Line($"remote: a hello from this build: ready {remote.Ready}, revision {remote.Model.Snapshot?.Revision}; {string.Join(", ", sent)}");
                 if (!remote.Ready || !DeskNet.ClientReady(out _))
@@ -2279,7 +2286,7 @@ namespace Contracts.Mod.Runtime
                      $"(expected ${expected:N0}); owed ${rt.State.Owed:N0}; the kiosk tells '{told}'");
                 if (c.Level != from - 1 || Math.Abs(charged - expected) > 0.5 || Math.Abs(quoted - expected) > 0.5 || rt.State.Owed > 0.5)
                     Problem("pay: lowering did not cost the quoted penalty at midnight");
-                if (told == null || !told.Contains($"{id} L{from}>{from - 1}"))
+                if (told == null || !told.Contains(Invariant($"{id} L{from}>{from - 1}")))
                     Problem("pay: the kiosk was not told of the drop");
             });
 
@@ -3190,6 +3197,22 @@ namespace Contracts.Mod.Runtime
                     Problem($"save: the service sent {idled} car(s) back to idle");
                 var stillWorked = rt.State.Waybills.Count(w => worked != null && worked.Contains(w.Guid) && ContractRuntime.Worked(w));
                 Line($"save: of the {worked?.Count ?? 0} car(s) being worked before the service, {stillWorked} still are (the others finished)");
+            });
+            // Saved again on this build: the game gathers its save, and the state it holds is the
+            // runtime's, every contract and bill, with each bill's car among the saved cars.
+            Try("save: saved again", () =>
+            {
+                var saves = SingletonBehaviour<SaveGameManager>.Instance;
+                HarmonyLib.AccessTools.Method(typeof(SaveGameManager), "UpdateInternalData").Invoke(saves, null);
+                var saved = ContractState.Read(saves.data, out var unreadable);
+                var cars = saves.data.GetJObject(SaveGameKeys.Cars)?.ToString(Newtonsoft.Json.Formatting.None) ?? "";
+                var guids = rt.State.Waybills.Select(w => w.Guid).ToList();
+                var billsSaved = saved == null ? -1 : saved.Waybills.Count(w => guids.Contains(w.Guid));
+                var carsSaved = guids.Count(cars.Contains);
+                Line($"save (saved again): {saved?.Contracts.Count ?? -1} of {rt.State.Contracts.Count} contract(s), {billsSaved} of {guids.Count} bill(s) " +
+                     $"in the saved state (unreadable {unreadable}), {carsSaved} of their cars in the saved cars, stamped {saved?.ModVersion ?? "none"}");
+                if (saved == null || unreadable || saved.Contracts.Count != rt.State.Contracts.Count || billsSaved != guids.Count || carsSaved != guids.Count)
+                    Problem("save (saved again): the save does not hold the whole state");
             });
             yield return Finish();
         }

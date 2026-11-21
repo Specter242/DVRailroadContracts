@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 
@@ -38,7 +39,9 @@ namespace Contracts.Core.Industries
                 .Select(id =>
                 {
                     var m = Numbered.Match(id);
-                    return m.Success ? (Family: m.Groups[1].Value, Level: int.Parse(m.Groups[2].Value), Id: id) : (Family: id, Level: 0, Id: id);
+                    return m.Success && int.TryParse(m.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var level)
+                        ? (Family: m.Groups[1].Value, Level: level, Id: id)
+                        : (Family: id, Level: 0, Id: id);
                 })
                 .GroupBy(l => l.Family, StringComparer.Ordinal)
                 .OrderBy(g => g.Key, StringComparer.Ordinal)

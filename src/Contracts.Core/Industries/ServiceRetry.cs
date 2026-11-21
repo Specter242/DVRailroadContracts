@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using static System.FormattableString;
 
 namespace Contracts.Core.Industries
 {
@@ -64,7 +65,7 @@ namespace Contracts.Core.Industries
             var places = (waiting ?? Enumerable.Empty<Order>()).Where(o => o != null && o.Count > 0)
                 .GroupBy(o => nameOf(o.Interchange) ?? o.Interchange, StringComparer.Ordinal)
                 .OrderBy(g => g.Key, StringComparer.Ordinal)
-                .Select(g => $"{g.Sum(o => o.Count)} at {g.Key}").ToList();
+                .Select(g => Invariant($"{g.Sum(o => o.Count)} at {g.Key}")).ToList();
             if (places.Count == 0)
                 return null;
             var again = retryAt.HasValue && now.HasValue ? $" The service comes again {At(retryAt.Value, now.Value)}." : "";
@@ -86,7 +87,7 @@ namespace Contracts.Core.Industries
                 minutes = 0;
                 day++;
             }
-            var time = $"{minutes / 60:00}:{minutes % 60:00}";
+            var time = Invariant($"{minutes / 60:00}:{minutes % 60:00}");
             return day > (int)Math.Floor(now) ? $"tomorrow at {time}" : $"at {time}";
         }
     }

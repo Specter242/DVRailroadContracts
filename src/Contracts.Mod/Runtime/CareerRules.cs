@@ -234,10 +234,15 @@ namespace Contracts.Mod.Runtime
                 {
                     var saved = ContractState.GuidsIn(ContractState.CurrentSave);
                     if (saved.Count == 0)
+                    {
+                        if (ContractRuntime.Instance == null)
+                            IsContractCar = g => false;
                         return;
-                    var previous = IsContractCar;
-                    IsContractCar = g => g != null && (saved.Contains(g) || previous(g));
+                    }
+                    IsContractCar = g => g != null && saved.Contains(g);
                     var deleter = SingletonBehaviour<UnusedTrainCarDeleter>.Instance;
+                    if (deleter == null)
+                        return;
                     var marked = deleter.GetUnusedTrainCarsList().Where(c => c != null && c.logicCar != null && saved.Contains(c.logicCar.carGuid)).ToList();
                     if (marked.Count > 0)
                         deleter.UnmarkFromDeleteList(marked);

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using static System.FormattableString;
 
 namespace Contracts.Core.Industries
 {
@@ -63,10 +64,10 @@ namespace Contracts.Core.Industries
                 return "Level 5 is the top";
             var days = history?.Count ?? 0;
             if (days < RaiseDays)
-                return $"Needs {RaiseDays} days over {RaiseAverage * 100:0}%; has {days}";
+                return Invariant($"Needs {RaiseDays} days over {RaiseAverage * 100:0}%; has {days}");
             var average = history.Average();
             if (average <= RaiseAverage)
-                return $"Needs over {RaiseAverage * 100:0}%; {Math.Floor(average * 100):0}% in {days} days";
+                return Invariant($"Needs over {RaiseAverage * 100:0}%; {Math.Floor(average * 100):0}% in {days} days");
             return null;
         }
 
@@ -76,7 +77,7 @@ namespace Contracts.Core.Industries
         /// Nexus, 2026-11-10: "L1 %100. how can i L2").
         /// </summary>
         public static string RaiseDaysShort(int level, int days) =>
-            level < 1 || level >= 5 || days >= RaiseDays ? null : $"{Math.Max(0, days)}/{RaiseDays}d";
+            level < 1 || level >= 5 || days >= RaiseDays ? null : Invariant($"{Math.Max(0, days)}/{RaiseDays}d");
 
         /// <summary>
         /// A blocked raise's row value, at most 12 characters: the days so far ("2/3 days"), or
@@ -87,7 +88,7 @@ namespace Contracts.Core.Industries
             if (RaiseBlocker(level, history) == null)
                 return null;
             var days = history?.Count ?? 0;
-            return level < 1 || level >= 5 ? "locked" : days < RaiseDays ? $"{days}/{RaiseDays} days" : $"needs >{RaiseAverage * 100:0}%";
+            return level < 1 || level >= 5 ? "locked" : days < RaiseDays ? Invariant($"{days}/{RaiseDays} days") : Invariant($"needs >{RaiseAverage * 100:0}%");
         }
 
         /// <summary>
@@ -98,8 +99,8 @@ namespace Contracts.Core.Industries
         {
             var days = history?.Count ?? 0;
             return days < RaiseDays
-                ? $"{id} stays L{level}: {days} of {RaiseDays} days"
-                : $"{id} stays L{level}: {Math.Floor(history.Average() * 100):0}%, needs over {RaiseAverage * 100:0}%";
+                ? Invariant($"{id} stays L{level}: {days} of {RaiseDays} days")
+                : Invariant($"{id} stays L{level}: {Math.Floor(history.Average() * 100):0}%, needs over {RaiseAverage * 100:0}%");
         }
     }
 }

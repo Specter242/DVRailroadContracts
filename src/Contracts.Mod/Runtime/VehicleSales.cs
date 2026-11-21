@@ -10,6 +10,7 @@ using DV.ThingTypes;
 using DV.Utils;
 using HarmonyLib;
 using Newtonsoft.Json.Linq;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Runtime
 {
@@ -144,7 +145,7 @@ namespace Contracts.Mod.Runtime
             var recorded = cars.All(c => bought.ContainsKey(c.logicCar.carGuid));
             var paid = recorded ? cars.Sum(c => bought[c.logicCar.carGuid].Price) : prices.Today(cars, coaches);
             var owed = Owed(cars);
-            var name = LocoShop.NameOf(head.carLivery) + (coaches && cars.Count > 1 ? $" x{cars.Count}" : "");
+            var name = LocoShop.NameOf(head.carLivery) + (coaches && cars.Count > 1 ? Invariant($" x{cars.Count}") : "");
             var label = $"{head.ID} {name}";
             return new Unit
             {
@@ -194,9 +195,20 @@ namespace Contracts.Mod.Runtime
         {
             if (PlayerManager.Car != null && cars.Contains(PlayerManager.Car))
                 return "You're on it. Step off first.";
-            // In Multiplayer, any player's (Kiosk.DeskNet; the add-on gives the cars they stand on).
-            if (Kiosk.DeskNet.CarsWithPlayers?.Invoke().Any(c => c != null && cars.Contains(c)) == true)
-                return "A player is on it. They step off first.";
+            // In Multiplayer, any player's (Kiosk.DeskNet; the add-on gives the cars they stand on, or null when unavailable).
+            var carsWithPlayers = Kiosk.DeskNet.CarsWithPlayers;
+            if (carsWithPlayers != null)
+            {
+                var occupied = carsWithPlayers();
+                if (occupied == null)
+                    return "Could not verify whether another player is aboard; try again in a moment.";
+                if (occupied.Any(c => c != null && cars.Contains(c)))
+                    return "A player is on it. They step off first.";
+            }
+            else if (Kiosk.Multiplayer.HostsOthers)
+            {
+                return "Could not verify whether another player is aboard; try again in a moment.";
+            }
             if (cars.SelectMany(Neighbours).Any(n => !cars.Contains(n)))
                 return "It's coupled to other cars. Uncouple it first.";
             var jobs = SingletonBehaviour<JobsManager>.Instance;
@@ -205,25 +217,77 @@ namespace Contracts.Mod.Runtime
             return null;
         }
 
-        /// <summary>The kiosk's question before a sale: the offer and how it is made up.</summary>
-        public static string Ask(Unit u)
+        /// <summary>Precomputed fleet counts for building sale confirmation prompts without rescanning per unit.</summary>
+        internal readonly struct FleetSummary
         {
-            var paid = u.PaidRecorded ? $"the ${u.Paid:N0} you paid" : $"its ${u.Paid:N0} price today";
+            public readonly int Coaches;
+            public readonly int Locomotives;
+            public readonly bool HasPassengerContract;
+
+            public FleetSummary(int coaches, int locomotives, bool hasPassengerContract)
+            {
+                Coaches = coaches;
+                Locomotives = locomotives;
+                HasPassengerContract = hasPassengerContract;
+            }
+        }
+
+        /// <summary>Summarizes the player's owned units once for a batch of <see cref="Ask(Unit, FleetSummary)"/> calls.</summary>
+        internal static FleetSummary Summarize(IReadOnlyList<Unit> owned)
+        {
+            var coaches = 0;
+            var locomotives = 0;
+            if (owned != null)
+            {
+                for (var i = 0; i < owned.Count; i++)
+                {
+                    var o = owned[i];
+                    if (o?.Cars == null)
+                        continue;
+                    if (o.Coaches)
+                        coaches += o.Cars.Count;
+                    if (IsLocomotive(o))
+                        locomotives++;
+                }
+            }
+            var hasPassenger = State?.Contracts.Any(c => RuntimeDesk.IsPassenger(c.Id)) ?? false;
+            return new FleetSummary(coaches, locomotives, hasPassenger);
+        }
+
+        private static LocoShop.Item CheapestLocomotive()
+        {
+            var catalogue = LocoShop.Catalogue(LocoShop.Kind.Locomotives);
+            LocoShop.Item cheapest = null;
+            for (var i = 0; i < catalogue.Count; i++)
+            {
+                var item = catalogue[i];
+                if (cheapest == null || item.Price < cheapest.Price)
+                    cheapest = item;
+            }
+            return cheapest;
+        }
+
+        /// <summary>The kiosk's question before a sale: the offer and how it is made up.</summary>
+        public static string Ask(Unit u) => Ask(u, Summarize(Owned()));
+
+        /// <summary>The kiosk's question before a sale, reusing precomputed fleet counts.</summary>
+        internal static string Ask(Unit u, FleetSummary fleet)
+        {
+            var paid = u.PaidRecorded ? Invariant($"the ${u.Paid:N0} you paid") : Invariant($"its ${u.Paid:N0} price today");
             string why;
             if (u.Paid < 1.0)
                 why = $"Sell {u.Label} for nothing? It came with the career.";
             else if (u.Offer > Core.Shop.VehicleSale.Scrap * u.Paid + 0.5)
-                why = $"Sell {u.Label} for ${u.Offer:N0}? That's half {paid}, less ${u.Owed:N0} for its repairs and refills.";
+                why = Invariant($"Sell {u.Label} for ${u.Offer:N0}? That's half {paid}, less ${u.Owed:N0} for its repairs and refills.");
             else
-                why = $"Sell {u.Label} for ${u.Offer:N0}, its scrap value? Its repairs and refills (${u.Owed:N0}) cost more than half {paid}.";
-            var owned = Owned();
-            var coachesLeft = !u.Coaches ? -1 : owned.Where(o => o.Coaches).Sum(o => o.Cars.Count) - u.Cars.Count;
-            var warn = coachesLeft == 0 && (State?.Contracts.Any(c => RuntimeDesk.IsPassenger(c.Id)) ?? false)
+                why = Invariant($"Sell {u.Label} for ${u.Offer:N0}, its scrap value? Its repairs and refills (${u.Owed:N0}) cost more than half {paid}.");
+            var coachesLeft = !u.Coaches ? -1 : fleet.Coaches - u.Cars.Count;
+            var warn = coachesLeft == 0 && fleet.HasPassengerContract
                 ? " Your passenger trains wait until you have coaches again." : "";
             // The only locomotive: said before it goes, with whether the cash buys another.
-            if (IsLocomotive(u) && owned.Count(IsLocomotive) <= 1)
+            if (IsLocomotive(u) && fleet.Locomotives <= 1)
             {
-                var cheapest = LocoShop.Catalogue(LocoShop.Kind.Locomotives).OrderBy(i => i.Price).FirstOrDefault();
+                var cheapest = CheapestLocomotive();
                 if (cheapest != null)
                     warn += Core.Shop.VehicleSale.LastLocomotive(LocoShop.Money + u.Offer, cheapest.Price, cheapest.Name);
             }
@@ -273,8 +337,8 @@ namespace Contracts.Mod.Runtime
             DropBills(sold.Select(s => s.Id));
             State?.Bought.RemoveAll(p => sold.Any(s => s.Guid == p.Guid));
             inventory.AddMoney(offer);
-            Main.Log($"shop: bought back {u.Label} ({string.Join(", ", sold.Select(s => s.Id))}) for ${offer:N0} (paid ${u.Paid:N0}{(u.PaidRecorded ? "" : ", today's price")})");
-            return $"{u.Label} sold for ${offer:N0}.\n\nYou have ${inventory.PlayerMoney:N0}.";
+            Main.Log(Invariant($"shop: bought back {u.Label} ({string.Join(", ", sold.Select(s => s.Id))}) for ${offer:N0} (paid ${u.Paid:N0}{(u.PaidRecorded ? "" : ", today's price")})"));
+            return Invariant($"{u.Label} sold for ${offer:N0}.\n\nYou have ${inventory.PlayerMoney:N0}.");
         }
 
         // ------------------------------------------------------------ the game's kept state

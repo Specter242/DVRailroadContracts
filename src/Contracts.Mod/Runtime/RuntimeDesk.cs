@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Contracts.Core.Industries;
 using Contracts.Mod.Kiosk;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Runtime
 {
@@ -161,11 +162,11 @@ namespace Contracts.Mod.Runtime
         }
 
         public string Volume(ContractView contract, int level) =>
-            PassengerService.CityOf(contract.Id) != null ? $"{PassengerService.Trains(level)} trains"
+            PassengerService.CityOf(contract.Id) != null ? Invariant($"{PassengerService.Trains(level)} trains")
             : Rt?.Economy?.Data?.Bridges.FirstOrDefault(b => b.Id == contract.Id) is Bridge bridge
-                ? $"{IndustrySettings.DailyCarloads(bridge.Level5Carloads, level)} + {IndustrySettings.DailyCarloads(bridge.Level5Carloads, level)}"
+                ? Invariant($"{IndustrySettings.DailyCarloads(bridge.Level5Carloads, level)} + {IndustrySettings.DailyCarloads(bridge.Level5Carloads, level)}")
             : Industries.TryGetValue(contract.Id, out var i)
-                ? $"{i.Daily(LineRole.Product, level)} / {i.Daily(LineRole.Material, level)} / {i.Daily(LineRole.Waste, level)}"
+                ? Invariant($"{i.Daily(LineRole.Product, level)} / {i.Daily(LineRole.Material, level)} / {i.Daily(LineRole.Waste, level)}")
                 : "";
 
         public (int Count, string Text) Jobless()
@@ -216,7 +217,7 @@ namespace Contracts.Mod.Runtime
                 level = held.Level + 1;
             }
             held.Requested = level;
-            Main.Log($"contracts: {held.Id} asks for level {held.Requested} from midnight");
+            Main.Log(Invariant($"contracts: {held.Id} asks for level {held.Requested} from midnight"));
         }
 
         public string RaiseBlocker(ContractView contract)
@@ -295,9 +296,21 @@ namespace Contracts.Mod.Runtime
             return item == null ? $"{key} is not sold here any more." : LocoShop.Buy(item, place);
         }
 
-        internal static List<SaleRow> SaleRows() =>
-            VehicleSales.Owned().Where(u => u.Cars.Count > 0 && u.Cars[0]?.logicCar != null)
-                .Select(u => new SaleRow { Key = u.Cars[0].logicCar.carGuid, Label = u.Label, Offer = u.Offer, Blocker = u.Blocker, Ask = VehicleSales.Ask(u) }).ToList();
+        internal static List<SaleRow> SaleRows()
+        {
+            var owned = VehicleSales.Owned();
+            if (owned.Count == 0)
+                return new List<SaleRow>();
+            var fleet = VehicleSales.Summarize(owned);
+            var rows = new List<SaleRow>(owned.Count);
+            for (var i = 0; i < owned.Count; i++)
+            {
+                var u = owned[i];
+                if (u.Cars.Count > 0 && u.Cars[0]?.logicCar != null)
+                    rows.Add(new SaleRow { Key = u.Cars[0].logicCar.carGuid, Label = u.Label, Offer = u.Offer, Blocker = u.Blocker, Ask = VehicleSales.Ask(u, fleet) });
+            }
+            return rows;
+        }
 
         internal static string SellRow(string key)
         {
@@ -322,7 +335,7 @@ namespace Contracts.Mod.Runtime
                 if (Rt.OnHold != null)
                     return ContractTerms.HoldLine;
                 var minutes = DV.Globals.G?.GameParams?.DayLengthInMinutes ?? 0f;
-                return minutes > 0f && minutes < 24f * 60f - 1f ? $"Days last {minutes / 60f:0.#} h: set 24 h" : null;
+                return minutes > 0f && minutes < 24f * 60f - 1f ? Invariant($"Days last {minutes / 60f:0.#} h: set 24 h") : null;
             }
         }
     }

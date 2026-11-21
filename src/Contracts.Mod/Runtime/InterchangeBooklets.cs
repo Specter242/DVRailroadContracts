@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using DV.Booklets;
 using DV.Logic.Job;
 using HarmonyLib;
@@ -35,6 +37,8 @@ namespace Contracts.Mod.Runtime
         private static readonly Dictionary<string, PointOnPlane> Tables = new Dictionary<string, PointOnPlane>(StringComparer.Ordinal);
         private static bool laying;
         private float timer;
+
+        internal static void Clear() => Tables.Clear();
 
         public static void Install()
         {
@@ -134,8 +138,8 @@ namespace Contracts.Mod.Runtime
                 var station = Economy.Station(InterchangeYards.NeighborOf(interchange));
                 if (station?.logicStation == null)
                     continue;
-                var processed = Traverse.Create(station).Field("processedNewJobs").GetValue<HashSet<Job>>();
-                var spawned = Traverse.Create(station).Field("spawnedJobOverviews").GetValue<List<JobOverview>>();
+                var processed = ContractRuntime.StationProcessedNewJobsField?.GetValue(station) as HashSet<Job>;
+                var spawned = ContractRuntime.StationSpawnedJobOverviewsField?.GetValue(station) as List<JobOverview>;
                 if (processed == null || spawned == null)
                     continue;
                 var job = station.logicStation.availableJobs.FirstOrDefault(j => !processed.Contains(j) && InterchangeOf(j) == interchange);
@@ -176,11 +180,24 @@ namespace Contracts.Mod.Runtime
             Main.Log("Persistent Jobs: jobs whose cars stand at an interchange count as in their station's range");
         }
 
+        // Task subclasses (TransportTask, WarehouseTask, custom mod tasks) declare their own `cars` field; cache per concrete type.
+        private static readonly ConcurrentDictionary<Type, FieldInfo> TaskCarsFields = new ConcurrentDictionary<Type, FieldInfo>();
+
+        private static List<Car> CarsOfTask(Task task)
+        {
+            if (task == null)
+                return null;
+            if (task.GetType() == typeof(WarehouseTask))
+                return ((WarehouseTask)task).cars;
+            var field = TaskCarsFields.GetOrAdd(task.GetType(), t => AccessTools.Field(t, "cars"));
+            return field?.GetValue(task) as List<Car>;
+        }
+
         private static void InRangeAtInterchange(Task task, ref bool __result)
         {
             try
             {
-                if (!__result && ContractRuntime.Active && Traverse.Create(task).Field("cars").GetValue<List<Car>>() is List<Car> cars)
+                if (!__result && ContractRuntime.Active && CarsOfTask(task) is List<Car> cars)
                 {
                     var registry = DV.Utils.SingletonBehaviour<TrainCarRegistry>.Instance;
                     __result = cars.Any(c => InterchangeYards.IsInterchangeTrack(c?.FrontBogieTrack)

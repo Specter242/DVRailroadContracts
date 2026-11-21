@@ -4,6 +4,7 @@ using System.Linq;
 using DV.Utils;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
+using static System.FormattableString;
 
 // Fields are filled by the JSON reader.
 #pragma warning disable CS0649
@@ -149,26 +150,41 @@ namespace Contracts.Mod.Runtime
         [JsonProperty("retry")] public double? RetryAt;
 
         [JsonIgnore] private Dictionary<string, Waybill> byGuid;
+        [JsonIgnore] private int indexedCount = -1;
 
         public Waybill Of(string guid)
         {
-            if (guid == null)
+            if (string.IsNullOrEmpty(guid))
                 return null;
-            if (byGuid == null || byGuid.Count != Waybills.Count)
-                byGuid = Waybills.Where(w => w.Guid != null).GroupBy(w => w.Guid).ToDictionary(g => g.Key, g => g.First());
-            return byGuid.TryGetValue(guid, out var w) ? w : null;
+            if (byGuid == null || indexedCount != Waybills.Count)
+            {
+                var map = new Dictionary<string, Waybill>(Waybills.Count, StringComparer.Ordinal);
+                foreach (var w in Waybills)
+                    if (w != null && !string.IsNullOrEmpty(w.Guid) && !map.ContainsKey(w.Guid))
+                        map[w.Guid] = w;
+                byGuid = map;
+                indexedCount = Waybills.Count;
+            }
+            return byGuid.TryGetValue(guid, out var found) ? found : null;
         }
 
         public void Add(Waybill w)
         {
+            if (w == null || string.IsNullOrEmpty(w.Guid))
+                return;
+            Waybills.RemoveAll(existing => existing == null || string.Equals(existing.Guid, w.Guid, StringComparison.Ordinal));
             Waybills.Add(w);
             byGuid = null;
+            indexedCount = -1;
         }
 
         public void Remove(string guid)
         {
-            Waybills.RemoveAll(w => w.Guid == guid);
+            if (string.IsNullOrEmpty(guid))
+                return;
+            Waybills.RemoveAll(w => w == null || string.Equals(w.Guid, guid, StringComparison.Ordinal));
             byGuid = null;
+            indexedCount = -1;
         }
 
         /// <summary>The state in a save, or null if it has none or it can't be read (then the runtime stays off).</summary>
@@ -185,8 +201,8 @@ namespace Contracts.Mod.Runtime
                 var state = saved.ToObject<ContractState>();
                 if (state == null || state.Version > CurrentVersion)
                 {
-                    Main.Error($"the saved contracts are in a newer format (version {state?.Version}, written by {state?.ModVersion ?? "a newer build"}; " +
-                               $"this build reads up to {CurrentVersion}); contracts stay off and the save keeps them. Update Railroad Contracts");
+                    Main.Error(Invariant($"the saved contracts are in a newer format (version {state?.Version}, written by {state?.ModVersion ?? "a newer build"}; ") +
+                               Invariant($"this build reads up to {CurrentVersion}); contracts stay off and the save keeps them. Update Railroad Contracts"));
                     unreadable = true;
                     return null;
                 }
@@ -205,8 +221,8 @@ namespace Contracts.Mod.Runtime
 
         /// <summary>
         /// Puts right what a save can hold that the runtime can't work with: lists left null, records
-        /// with no id, levels out of range, a stage this build doesn't know (a newer build's: the
-        /// car goes idle, and the next service plans it again). Returns what it changed.
+        /// with no id, duplicate records, levels out of range, a stage this build doesn't know (a newer
+        /// build's: the car goes idle, and the next service plans it again). Returns what it changed.
         /// </summary>
         public List<string> Normalize()
         {
@@ -222,34 +238,47 @@ namespace Contracts.Mod.Runtime
             Waiting.RemoveAll(o => o == null || o.Count <= 0 || string.IsNullOrEmpty(o.Interchange) || string.IsNullOrEmpty(o.CarType));
             var dropped = before.Item1 - Contracts.Count + before.Item2 - Waybills.Count + before.Item3 - Bought.Count + before.Item4 - Waiting.Count;
             if (dropped > 0)
-                mended.Add($"{dropped} record(s) without an id dropped");
+                mended.Add(Invariant($"{dropped} record(s) without an id dropped"));
+            var seenContracts = new HashSet<string>(StringComparer.Ordinal);
+            var duplicateContracts = Contracts.RemoveAll(c => !seenContracts.Add(c.Id));
+            if (duplicateContracts > 0)
+                mended.Add(Invariant($"{duplicateContracts} duplicate contract(s) dropped"));
+            var seenWaybills = new HashSet<string>(StringComparer.Ordinal);
+            var duplicateWaybills = Waybills.RemoveAll(w => !seenWaybills.Add(w.Guid));
+            if (duplicateWaybills > 0)
+                mended.Add(Invariant($"{duplicateWaybills} duplicate waybill(s) dropped"));
+            var seenBought = new HashSet<string>(StringComparer.Ordinal);
+            var duplicateBought = Bought.RemoveAll(p => !seenBought.Add(p.Guid));
+            if (duplicateBought > 0)
+                mended.Add(Invariant($"{duplicateBought} duplicate purchase(s) dropped"));
             foreach (var c in Contracts)
             {
                 c.History = c.History ?? new List<double>();
                 c.Closed = c.Closed ?? new List<double>();
                 c.Due = c.Due ?? new List<double>();
                 c.Running = c.Running ?? new List<Departure>();
-                c.Running.RemoveAll(r => r == null);
+                c.Running.RemoveAll(r => r == null || string.IsNullOrEmpty(r.Job));
                 var (level, requested) = (Math.Max(0, Math.Min(5, c.Level)), Math.Max(0, Math.Min(5, c.Requested)));
                 if (level != c.Level || requested != c.Requested)
                 {
-                    mended.Add($"{c.Id}'s level {c.Level} (asked {c.Requested}) brought within 0 to 5");
+                    mended.Add(Invariant($"{c.Id}'s level {c.Level} (asked {c.Requested}) brought within 0 to 5"));
                     c.Level = level;
                     c.Requested = requested;
                 }
             }
             foreach (var w in Waybills.Where(w => !Enum.IsDefined(typeof(Stage), w.Stage)))
             {
-                mended.Add($"car {w.Guid}'s stage {(int)w.Stage}, unknown to this build, made idle");
+                mended.Add(Invariant($"car {w.Guid}'s stage {(int)w.Stage}, unknown to this build, made idle"));
                 w.Stage = Stage.Idle;
                 w.Opened = w.Spotted = w.Ready = null;
             }
-            if (Owed < 0.0 || double.IsNaN(Owed))
+            if (Owed < 0.0 || double.IsNaN(Owed) || double.IsInfinity(Owed))
             {
-                mended.Add($"owed {Owed} made 0");
+                mended.Add(Invariant($"owed {Owed} made 0"));
                 Owed = 0.0;
             }
             byGuid = null;
+            indexedCount = -1;
             return mended;
         }
 

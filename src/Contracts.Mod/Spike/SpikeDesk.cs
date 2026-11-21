@@ -4,6 +4,7 @@ using System.Linq;
 using Contracts.Core.Industries;
 using Contracts.Mod.Kiosk;
 using DV;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Spike
 {
@@ -154,7 +155,7 @@ namespace Contracts.Mod.Spike
             {
                 var minutes = Globals.G?.GameParams?.DayLengthInMinutes ?? 0f;
                 return minutes > 0f && minutes < 24f * 60f - 1f
-                    ? $"Days last {minutes / 60f:0.#} h: set 24 h"
+                    ? Invariant($"Days last {minutes / 60f:0.#} h: set 24 h")
                     : null;
             }
         }

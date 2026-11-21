@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2 (2026-11-21)
+
+- Performance improvements and bug fixes.
+- Fixed: a job between the two interchanges could name the wrong interchange on its pickup page.
+
 ## 0.2.1 (2026-11-12)
 
 - In multiplayer, a job turned in by a player who joined is paid straight into the railroad's cash. Before, its banknotes came out in the host's game, where that player couldn't take them.

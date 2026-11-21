@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using static System.FormattableString;
 
 namespace Contracts.Core.Industries
 {
@@ -73,7 +74,7 @@ namespace Contracts.Core.Industries
             var list = (cars ?? Enumerable.Empty<JoblessCar>()).ToList();
             if (list.Count == 0)
                 return null;
-            return $"{list.Count} contract car(s) without a job: " +
+            return Invariant($"{list.Count} contract car(s) without a job: ") +
                    string.Join("; ", Groups(list, namesPerGroup).Select(g => $"{char.ToLowerInvariant(g.Lead[0])}{g.Lead.Substring(1)}: {g.Names}"));
         }
 
@@ -86,7 +87,7 @@ namespace Contracts.Core.Industries
                     var ids = at.OrderBy(c => c.Id, StringComparer.Ordinal).Select(c => c.Note == null ? c.Id : $"{c.Id} ({c.Note})").ToList();
                     var names = string.Join(", ", ids.Take(Math.Max(1, namesPerGroup)));
                     if (ids.Count > namesPerGroup)
-                        names += $" and {ids.Count - namesPerGroup} more";
+                        names += Invariant($" and {ids.Count - namesPerGroup} more");
                     yield return (Lead(reason, at.Key), names);
                 }
         }

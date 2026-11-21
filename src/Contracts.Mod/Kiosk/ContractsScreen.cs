@@ -1,6 +1,8 @@
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using DV.ServicePenalty.UI;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Kiosk
 {
@@ -96,8 +98,8 @@ namespace Contracts.Mod.Kiosk
             var message = KioskMenu.TakeMessage();
             var owed = KioskMenu.Desk?.Owed ?? 0.0;
             lines.Info.text = message ?? KioskMenu.Desk?.Notice
-                              ?? (owed >= 1.0 ? $"Owed ${owed:N0}; {mine} yours, {offers} on offer"
-                                  : offers + mine == 0 ? "No contracts on offer" : $"{mine} yours, {offers} on offer");
+                              ?? (owed >= 1.0 ? Invariant($"Owed ${owed:N0}; {mine} yours, {offers} on offer")
+                                  : offers + mine == 0 ? "No contracts on offer" : Invariant($"{mine} yours, {offers} on offer"));
         }
 
         public override void Disable()
@@ -186,16 +188,16 @@ namespace Contracts.Mod.Kiosk
             if (Runtime.RuntimeDesk.ShopOf(c.Id) != null || c.Id == Runtime.RuntimeDesk.SellId)
                 return "shop";
             if (c.Id == Runtime.RuntimeDesk.JoblessId || c.Id == Runtime.RuntimeDesk.WaitingId)
-                return $"{c.OpenWaybills}";
+                return c.OpenWaybills.ToString(CultureInfo.InvariantCulture);
             if (c.Id == Runtime.RuntimeDesk.HoldId)
                 return "why";
             if (c.Id == Runtime.RuntimeDesk.OwedId)
-                return $"${KioskMenu.Desk?.Owed ?? 0.0:N0}";
+                return Invariant($"${KioskMenu.Desk?.Owed ?? 0.0:N0}");
             if (c.Id == Runtime.RuntimeDesk.DayLengthId)
                 return KioskMenu.Desk?.DayLength?.Value ?? "";
             if (c.IsOffer)
                 return c.Needs != null ? "locked" : "offer";
-            return c.ToMove.HasValue ? $"{c.ToMove.Value} {Standing(c)}" : Standing(c);
+            return c.ToMove.HasValue ? Invariant($"{c.ToMove.Value} {Standing(c)}") : Standing(c);
         }
 
         /// <summary>
@@ -208,13 +210,13 @@ namespace Contracts.Mod.Kiosk
         internal static string Standing(ContractView c)
         {
             if (c.Level == 0)
-                return $"new L{c.RequestedLevel}";
+                return Invariant($"new L{c.RequestedLevel}");
             if (c.Ending)
-                return $"L{c.Level} ends";
+                return Invariant($"L{c.Level} ends");
             if (c.RequestedLevel == c.Level && Contracts.Core.Industries.ContractStanding.RaiseDaysShort(c.Level, c.ScoredDays) is string days)
-                return $"L{c.Level} {days}";
-            var perf = c.Performance.HasValue ? $" {c.Performance.Value * 100f:0}%" : "";
-            return c.RequestedLevel != c.Level ? $"L{c.Level}>{c.RequestedLevel}{perf}" : $"L{c.Level}{perf}";
+                return Invariant($"L{c.Level} {days}");
+            var perf = c.Performance.HasValue ? Invariant($" {c.Performance.Value * 100f:0}%") : "";
+            return c.RequestedLevel != c.Level ? Invariant($"L{c.Level}>{c.RequestedLevel}{perf}") : Invariant($"L{c.Level}{perf}");
         }
 
         public override void HighlightSelected(int newHighlight, int prevHighlighted = -1)

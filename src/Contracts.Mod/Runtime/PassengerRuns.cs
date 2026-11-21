@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using Contracts.Core.Industries;
 using DV.Logic.Job;
 using DV.Utils;
 using HarmonyLib;
 using UnityEngine;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Runtime
 {
@@ -27,13 +29,24 @@ namespace Contracts.Mod.Runtime
         private const float RetrySeconds = 60f;
         private static readonly Dictionary<string, float> noRouteUntil = new Dictionary<string, float>(StringComparer.Ordinal);
 
+        internal static void Clear() => noRouteUntil.Clear();
+
         public static IEnumerable<HeldContract> Held(ContractState state) => state.Contracts.Where(c => PassengerService.CityOf(c.Id) != null);
+
+        private static readonly FieldInfo JobsManagerAllJobsField = AccessTools.Field(typeof(JobsManager), "allJobs");
 
         private static HashSet<string> LiveJobIds()
         {
             var jobs = SingletonBehaviour<JobsManager>.Instance;
-            var all = jobs == null ? null : Traverse.Create(jobs).Field("allJobs").GetValue<List<Job>>();
-            return new HashSet<string>((all ?? new List<Job>()).Where(j => j != null).Select(j => j.ID), StringComparer.Ordinal);
+            var all = jobs == null ? null : JobsManagerAllJobsField?.GetValue(jobs) as List<Job>;
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            if (all != null)
+            {
+                for (var i = 0; i < all.Count; i++)
+                    if (all[i] != null)
+                        ids.Add(all[i].ID);
+            }
+            return ids;
         }
 
         /// <summary>
@@ -58,7 +71,7 @@ namespace Contracts.Mod.Runtime
                 made += PassengerService.Trains(c.Level);
                 dropped += PassengerService.MakeDue(c.Due, c.Level, day, c.Closed);
             }
-            return made + again + dropped == 0 ? null : $"passengers: {made} train(s) timetabled, {again} due again, {dropped} dropped unrun";
+            return made + again + dropped == 0 ? null : Invariant($"passengers: {made} train(s) timetabled, {again} due again, {dropped} dropped unrun");
         }
 
         /// <summary>A train's job is done: its bill closes at its age.</summary>
@@ -115,7 +128,7 @@ namespace Contracts.Mod.Runtime
                     if (job == null)
                     {
                         noRouteUntil[Key(coaches)] = Time.realtimeSinceStartup + RetrySeconds;
-                        Main.Warn($"passengers: no route from {start.ID.FullDisplayID} for {coaches.Count} coach(es); tried again in a minute");
+                        Main.Warn(Invariant($"passengers: no route from {start.ID.FullDisplayID} for {coaches.Count} coach(es); tried again in a minute"));
                         continue;
                     }
                     idle.Remove(coaches);
@@ -123,8 +136,8 @@ namespace Contracts.Mod.Runtime
                     c.Running.Add(new Departure { Job = job.ID, Opened = time });
                     if (express)
                         c.NextExpress = type != Passengers.Express;
-                    Main.Log($"passengers: {c.Id}'s {Clock(time)} train is {job.ID} ({(type == Passengers.Express ? "express" : "local")}, " +
-                             $"{coaches.Count} coach(es) at {Passengers.TrackOf(coaches)?.ID?.FullDisplayID ?? "?"}, boarding on {start.ID.FullDisplayID})");
+                    Main.Log(Invariant($"passengers: {c.Id}'s {Clock(time)} train is {job.ID} ({(type == Passengers.Express ? "express" : "local")}, ") +
+                             Invariant($"{coaches.Count} coach(es) at {Passengers.TrackOf(coaches)?.ID?.FullDisplayID ?? "?"}, boarding on {start.ID.FullDisplayID})"));
                     break;
                 }
             }
@@ -146,7 +159,7 @@ namespace Contracts.Mod.Runtime
         private static string Clock(double time)
         {
             var minutes = (int)Math.Round((time - Math.Floor(time)) * 24 * 60);
-            return $"{minutes / 60:00}:{minutes % 60:00}";
+            return Invariant($"{minutes / 60:00}:{minutes % 60:00}");
         }
     }
 }

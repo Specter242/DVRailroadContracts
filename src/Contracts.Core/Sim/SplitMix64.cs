@@ -13,6 +13,25 @@ namespace Contracts.Core.Sim
 
         public ulong State { get; private set; }
 
+        /// <summary>Deterministic 64-bit FNV-1a hash (unlike string.GetHashCode, stable across runs and platforms).</summary>
+        public static ulong Hash(string text)
+        {
+            unchecked
+            {
+                var hash = 14695981039346656037UL;
+                if (text != null)
+                    for (var i = 0; i < text.Length; i++)
+                    {
+                        var ch = text[i];
+                        hash ^= (byte)ch;
+                        hash *= 1099511628211UL;
+                        hash ^= (byte)(ch >> 8);
+                        hash *= 1099511628211UL;
+                    }
+                return hash;
+            }
+        }
+
         public ulong NextULong()
         {
             unchecked

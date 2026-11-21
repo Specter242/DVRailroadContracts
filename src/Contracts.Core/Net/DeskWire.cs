@@ -37,9 +37,42 @@ namespace Contracts.Core.Net
 
         public const byte Hello = 1, Request = 2, Result = 3, Snapshot = 4;
 
+        /// <summary>Byte length of the leading little-endian revision header in a serialized <see cref="DeskSnapshot"/>.</summary>
+        public const int SnapshotHeaderBytes = sizeof(uint);
+
         /// <summary>A text cut to a length, with a mark that it goes on (on the host's kiosk).</summary>
         public static string Clip(string text, int max) =>
             text == null || text.Length <= max ? text : text.Substring(0, Math.Max(0, max - 24)).TrimEnd() + "\n\n(More at the host's kiosk.)";
+
+        /// <summary>
+        /// Whether two serialized <see cref="DeskSnapshot"/> frames carry the same payload,
+        /// ignoring their leading 4-byte <see cref="DeskSnapshot.Revision"/> header.
+        /// </summary>
+        public static bool SameSnapshotPayload(byte[] a, byte[] b)
+        {
+            if (ReferenceEquals(a, b))
+                return a != null && a.Length >= SnapshotHeaderBytes;
+            if (a == null || b == null || a.Length != b.Length || a.Length < SnapshotHeaderBytes)
+                return false;
+            for (var i = SnapshotHeaderBytes; i < a.Length; i++)
+                if (a[i] != b[i])
+                    return false;
+            return true;
+        }
+
+        /// <summary>
+        /// Stamps <paramref name="revision"/> into the leading 4-byte little-endian header of a
+        /// serialized <see cref="DeskSnapshot"/> frame in place, matching <see cref="Write(DeskSnapshot)"/>.
+        /// </summary>
+        public static void StampSnapshotRevision(byte[] frame, uint revision)
+        {
+            if (frame == null || frame.Length < SnapshotHeaderBytes)
+                throw new ArgumentException("Snapshot frame is too short for a revision header.", nameof(frame));
+            frame[0] = (byte)revision;
+            frame[1] = (byte)(revision >> 8);
+            frame[2] = (byte)(revision >> 16);
+            frame[3] = (byte)(revision >> 24);
+        }
 
         // ------------------------------------------------------------ writing
 

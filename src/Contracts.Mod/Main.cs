@@ -48,6 +48,7 @@ namespace Contracts.Mod
                     Runtime.InterchangeBooklets.GuardJobRange(harmony);
                     // Last: the runtime starts only in a mod that loaded whole.
                     WorldStreamingInit.LoadingFinished += Runtime.ContractRuntime.OnWorldLoaded;
+                    UnloadWatcher.UnloadRequested += Runtime.ContractRuntime.OnUnload;
                     StartMultiplayerPart(modEntry);
                 }
 #if DEVTOOLS

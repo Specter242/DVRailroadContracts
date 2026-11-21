@@ -1,4 +1,5 @@
 using System;
+using static System.FormattableString;
 
 namespace Contracts.Core.Industries
 {
@@ -16,16 +17,16 @@ namespace Contracts.Core.Industries
 
         /// <summary>The day's length for the kiosk's value column ("2 h"), or null for 24-hour days (or none known).</summary>
         public static string Value(double minutes) =>
-            Short(minutes) ? $"{minutes / 60.0:0.#} h" : null;
+            Short(minutes) ? Invariant($"{minutes / 60.0:0.#} h") : null;
 
         /// <summary>The page, or null for 24-hour days (or none known).</summary>
         public static string Page(double minutes)
         {
             if (!Short(minutes))
                 return null;
-            var length = minutes < 60.0 ? $"{minutes:0} minutes" : minutes == 60.0 ? "1 hour" : $"{minutes / 60.0:0.#} hours";
-            return $"Contracts count game days: waybills age, contracts are scored at midnight and the cars come at 06:00, " +
-                   $"all by the world clock. Days last {length} here, so contracts run {FullDayMinutes / minutes:0.#} times faster than at 24 hours.\n\n" +
+            var length = minutes < 60.0 ? Invariant($"{minutes:0} minutes") : minutes == 60.0 ? "1 hour" : Invariant($"{minutes / 60.0:0.#} hours");
+            return "Contracts count game days: waybills age, contracts are scored at midnight and the cars come at 06:00, " +
+                   Invariant($"all by the world clock. Days last {length} here, so contracts run {FullDayMinutes / minutes:0.#} times faster than at 24 hours.\n\n") +
                    "To set 24-hour days, use a custom difficulty preset: in the main menu, pick the career, edit its difficulty " +
                    "and add a preset with Day Duration at 24 hours. Its Bonus Time sets how long jobs keep their bonus, up to 200%.\n\n" +
                    "The built-in presets can't be changed. A custom preset works in a career once your profile has unlocked " +

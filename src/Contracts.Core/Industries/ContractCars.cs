@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using static System.FormattableString;
 
 namespace Contracts.Core.Industries
 {
@@ -262,7 +263,7 @@ namespace Contracts.Core.Industries
         /// by where they go. At most 34 characters with two-digit counts.
         /// </summary>
         public static string ToMoveLine(IEnumerable<ContractCar> cars, IReadOnlyList<string> bridgeEnds = null) =>
-            "To move: " + string.Join(" / ", Sections(cars, bridgeEnds).Select(s => $"{s.Cars.Count(c => c.ToMove)} {s.Label}"));
+            "To move: " + string.Join(" / ", Sections(cars, bridgeEnds).Select(s => Invariant($"{s.Cars.Count(c => c.ToMove)} {s.Label}")));
 
         /// <summary>
         /// The kiosk's Cars page: a section a line (out, in, waste; or the bridge's directions),
@@ -283,7 +284,7 @@ namespace Contracts.Core.Industries
                     sections.Add($"{title}: none.");
                     continue;
                 }
-                var lines = new List<string> { $"{title}: {mine.Count} car{(mine.Count == 1 ? "" : "s")}, {mine.Count(c => c.ToMove)} to move." };
+                var lines = new List<string> { Invariant($"{title}: {mine.Count} car{(mine.Count == 1 ? "" : "s")}, {mine.Count(c => c.ToMove)} to move.") };
                 foreach (var g in mine.GroupBy(c => (c.Step, c.Place, c.Job))
                              .OrderBy(g => g.Key.Step)
                              .ThenBy(g => g.Key.Place, StringComparer.Ordinal)

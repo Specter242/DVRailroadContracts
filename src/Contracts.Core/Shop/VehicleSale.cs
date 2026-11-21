@@ -1,4 +1,5 @@
 using System;
+using static System.FormattableString;
 
 namespace Contracts.Core.Shop
 {
@@ -26,7 +27,7 @@ namespace Contracts.Core.Shop
 
         /// <summary>Why a vehicle can't be bought now, for the kiosk's info screen: the money falls short, by how much.</summary>
         public static string ShortOf(string name, double price, double money) =>
-            $"Not enough money for {name}.\n\nIt costs ${price:N0}. You have ${money:N0}, ${Math.Max(0.0, price - money):N0} short.";
+            Invariant($"Not enough money for {name}.\n\nIt costs ${price:N0}. You have ${money:N0}, ${Math.Max(0.0, price - money):N0} short.");
 
         /// <summary>
         /// The kiosk's warning before the player's only locomotive is sold (jkomodo, Nexus,
@@ -36,6 +37,6 @@ namespace Contracts.Core.Shop
         public static string LastLocomotive(double cashAfter, double cheapest, string cheapestName) =>
             cashAfter + 0.5 >= cheapest
                 ? " It is your only locomotive: without one you can't move a car."
-                : $" It is your only locomotive, and you couldn't buy another: you'd have ${cashAfter:N0}, and the cheapest, the {cheapestName}, is ${cheapest:N0}. Without one you can't move a car.";
+                : Invariant($" It is your only locomotive, and you couldn't buy another: you'd have ${cashAfter:N0}, and the cheapest, the {cheapestName}, is ${cheapest:N0}. Without one you can't move a car.");
     }
 }

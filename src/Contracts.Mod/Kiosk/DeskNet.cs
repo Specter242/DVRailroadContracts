@@ -5,6 +5,7 @@ using Contracts.Core.Industries;
 using Contracts.Core.Net;
 using Contracts.Mod.Runtime;
 using DV.ServicePenalty.UI;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Kiosk
 {
@@ -35,7 +36,7 @@ namespace Contracts.Mod.Kiosk
         /// <summary>The host, to one player (the add-on's own player object).</summary>
         public static Action<object, byte, byte[]> SendToPlayer;
 
-        /// <summary>The cars the players of the session stand on, on the host.</summary>
+        /// <summary>The cars the players of the session stand on, on the host; returns null if unavailable so callers fail closed.</summary>
         public static Func<IEnumerable<TrainCar>> CarsWithPlayers;
 
         /// <summary>Why the add-on is not at work, for the kiosk of a player who joined; null when it is.</summary>
@@ -110,15 +111,29 @@ namespace Contracts.Mod.Kiosk
         /// <summary>From the add-on, on the host: a player left.</summary>
         public static void OnPlayerLeft(object player) => players.Remove(player);
 
-        /// <summary>From the add-on: the session ended.</summary>
-        public static void OnSessionEnded()
+        /// <summary>From the add-on, on the host: the host session stopped.</summary>
+        public static void OnHostStopped()
         {
             players.Clear();
             lastSent = null;
-            SendToHost = null;
+            pushTimer = 0f;
+            unknownSaid = false;
             SendToPlayer = null;
             CarsWithPlayers = null;
+        }
+
+        /// <summary>From the add-on, on a player's game: the client session stopped.</summary>
+        public static void OnClientStopped()
+        {
+            SendToHost = null;
             Remote.Stop();
+        }
+
+        /// <summary>From the add-on or probe: both sides of the session ended.</summary>
+        public static void OnSessionEnded()
+        {
+            OnHostStopped();
+            OnClientStopped();
         }
 
         /// <summary>Does at the host's desk what a player asked at its kiosk; the result for that player.</summary>
@@ -166,13 +181,15 @@ namespace Contracts.Mod.Kiosk
                     break;
                 case DeskAction.Buy:
                     // The row's key, after "L:" for a locomotive or "C:" for coaches.
-                    if (request.Id == null || request.Id.Length < 3 || request.Id[1] != ':')
+                    if (request.Id == null || request.Id.Length < 3 || (request.Id[0] != 'C' && request.Id[0] != 'L') || request.Id[1] != ':')
                         return Refuse("That is not sold here.");
                     result.Message = desk.Buy(request.Id[0] == 'C', request.Id.Substring(2), place);
                     break;
                 case DeskAction.Sell:
                     result.Message = desk.Sell(request.Id);
                     break;
+                default:
+                    return Refuse("That request is not known.");
             }
             Main.Log($"multiplayer: {name} at {request.Place ?? "a kiosk"}: {request.Action} {request.Id}{(request.Action == DeskAction.Level ? $" {request.Level}" : "")}");
             return result;
@@ -227,23 +244,25 @@ namespace Contracts.Mod.Kiosk
             if (desk == null || to.Count == 0 || SendToPlayer == null)
                 return;
             var snapshot = Snapshot(desk);
-            snapshot.Revision = 0;
-            var plain = DeskWire.Write(snapshot);
-            if (plain == null)
+            var bytes = DeskWire.Write(snapshot);
+            if (bytes == null)
             {
                 Main.Error("multiplayer: the kiosk's snapshot is too long to send; the players' kiosks keep the last one");
                 return;
             }
-            var changed = lastSent == null || !plain.SequenceEqual(lastSent);
+            var changed = lastSent == null || !DeskWire.SameSnapshotPayload(bytes, lastSent);
             if (!changed && !force)
                 return;
             if (changed)
             {
-                lastSent = plain;
                 revision++;
+                DeskWire.StampSnapshotRevision(bytes, revision);
+                lastSent = bytes;
             }
-            snapshot.Revision = revision;
-            var bytes = DeskWire.Write(snapshot);
+            else
+            {
+                bytes = lastSent;
+            }
             foreach (var player in changed ? players.Union(to).ToList() : to.ToList())
                 Send(player, DeskWire.Snapshot, bytes);
         }
@@ -359,7 +378,7 @@ namespace Contracts.Mod.Kiosk
             Active = true;
             Refused = null;
             model.Clear();
-            awaiting = 0;
+            ClearAwaiting();
             own = null;
             if (takeKiosk)
             {
@@ -373,24 +392,27 @@ namespace Contracts.Mod.Kiosk
         /// <summary>The session ended: the kiosk is this game's own again.</summary>
         public void Stop()
         {
-            if (!Active)
-                return;
+            var wasActive = Active;
             Active = false;
+            Refused = null;
+            helloTimer = 0f;
+            ClearAwaiting();
             model.Clear();
-            if (ReferenceEquals(KioskMenu.Desk, this))
+            if (wasActive && ReferenceEquals(KioskMenu.Desk, this))
                 KioskMenu.Desk = own;
             own = null;
         }
 
         public void Tick(float seconds)
         {
+            if (Refused != null)
+                return;
             helloTimer -= seconds;
             if (helloTimer > 0f)
                 return;
             // Until the host's first snapshot, a hello every few seconds; after it, now and then, so a host that started again finds this player.
             helloTimer = model.Ready ? 60f : 4f;
-            if (Refused == null || !model.Ready)
-                DeskNet.SendToHost?.Invoke(DeskWire.Hello, DeskWire.Write(new DeskHello { Version = Main.Version, Protocol = DeskWire.Protocol }));
+            DeskNet.SendToHost?.Invoke(DeskWire.Hello, DeskWire.Write(new DeskHello { Version = Main.Version, Protocol = DeskWire.Protocol }));
         }
 
         public void Take(DeskSnapshot snapshot)
@@ -417,7 +439,7 @@ namespace Contracts.Mod.Kiosk
                 return;
             }
             var paged = result.Action == DeskAction.Buy || result.Action == DeskAction.Sell;
-            if (paged && result.Seq == awaiting && awaitingKiosk != null && ReferenceEquals(awaitingKiosk.CurrentScreen, awaitingInfo))
+            if (paged && result.Seq == awaiting && awaitingKiosk != null && awaitingInfo != null && ReferenceEquals(awaitingKiosk.CurrentScreen, awaitingInfo))
             {
                 KioskMenu.ShowInfo(awaitingInfo, awaitingBack, awaitingTitle, result.Message ?? "Done.");
                 awaitingKiosk.SetActiveDisplay(awaitingInfo);
@@ -425,7 +447,16 @@ namespace Contracts.Mod.Kiosk
             else if (!result.Ok || paged)
                 KioskMenu.Tell(Line(result.Message));
             if (result.Seq == awaiting)
-                awaiting = 0;
+                ClearAwaiting();
+        }
+
+        private void ClearAwaiting()
+        {
+            awaiting = 0;
+            awaitingKiosk = null;
+            awaitingInfo = null;
+            awaitingBack = null;
+            awaitingTitle = null;
         }
 
         /// <summary>A message's first line, cut to the list's info line.</summary>
@@ -516,7 +547,7 @@ namespace Contracts.Mod.Kiosk
             .Select(r => new ShopRow
             {
                 Key = r.Key, Name = r.Name, Price = r.Price,
-                Ask = $"Buy {r.Name} for ${r.Price:N0}? The railroad's cash pays for it, and it arrives at once on a free interchange track." +
+                Ask = Invariant($"Buy {r.Name} for ${r.Price:N0}? The railroad's cash pays for it, and it arrives at once on a free interchange track.") +
                       (coaches ? " Bring them to a platform to board." : ""),
             }).ToList();
 

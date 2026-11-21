@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using static System.FormattableString;
 
 namespace Contracts.Core.Industries
 {
@@ -109,7 +110,7 @@ namespace Contracts.Core.Industries
 
         /// <summary>Why the bridge can't be taken yet, for the kiosk's info line; null once a held contract is at <see cref="BridgeFromLevel"/>.</summary>
         public static string BridgeBlocker(IEnumerable<int> heldLevels) =>
-            (heldLevels ?? Enumerable.Empty<int>()).Any(l => l >= BridgeFromLevel) ? null : $"Needs a contract at level {BridgeFromLevel}";
+            (heldLevels ?? Enumerable.Empty<int>()).Any(l => l >= BridgeFromLevel) ? null : Invariant($"Needs a contract at level {BridgeFromLevel}");
 
         /// <summary>The kiosk's line while the contracts are on hold (at most 37 characters).</summary>
         public const string HoldLine = "On hold: Persistent Jobs has changed";
@@ -123,7 +124,7 @@ namespace Contracts.Core.Industries
         /// <summary>The kiosk's page on penalties not yet paid; null with nothing owed.</summary>
         public static string OwedPage(double owed) =>
             owed < 1.0 ? null
-                : $"You owe ${owed:N0} in contract penalties that your cash didn't cover when they were charged.\n\n" +
+                : Invariant($"You owe ${owed:N0} in contract penalties that your cash didn't cover when they were charged.\n\n") +
                   "It is taken from your cash as money comes in, all of it until the debt is paid, so wages you collect go to it first.\n\n" +
                   "Penalties are charged at midnight, for a contract lowered or ended, and for one that three poor days took down.";
 
@@ -134,13 +135,13 @@ namespace Contracts.Core.Industries
         /// </summary>
         public static string TakeQuestion(string name, int level, bool passenger, bool now)
         {
-            var exit = $"${Penalty(1, 0, 1):N0}";
+            var exit = Invariant($"${Penalty(1, 0, 1):N0}");
             if (now)
-                return $"Take {name} at level {level}? It starts now: " +
+                return Invariant($"Take {name} at level {level}? It starts now: ") +
                        (passenger ? "its trains run to the timetable from today, with coaches you own. "
                            : "its first cars come to the interchanges right away, then each day at 06:00. ") +
                        $"Giving it up before midnight is free; ending it later costs up to {exit}.";
-            return $"Take {name} at level {level}? It starts at midnight; " +
+            return Invariant($"Take {name} at level {level}? It starts at midnight; ") +
                    (passenger ? "its trains run to the timetable from 06:00, with coaches you own. "
                        : "its cars come to the interchanges from 06:00, with their jobs. ") +
                    $"{SleepHint} Giving it up before midnight is free; ending it later costs up to {exit}.";
@@ -160,7 +161,7 @@ namespace Contracts.Core.Industries
             var refused = refusals?.Count ?? 0;
             if (dropped + refused == 0)
                 return null;
-            var cost = charged > 0.0 ? $": -${charged:N0}" : "";
+            var cost = charged > 0.0 ? Invariant($": -${charged:N0}") : "";
             var parts = new List<string>();
             if (dropped > 0)
                 parts.Add(string.Join(", ", drops) + cost);
@@ -171,9 +172,9 @@ namespace Contracts.Core.Industries
                 return named;
             parts.Clear();
             if (dropped > 0)
-                parts.Add(refused > 0 ? $"{dropped} dropped{cost}" : $"{dropped} contracts dropped{cost}");
+                parts.Add(refused > 0 ? Invariant($"{dropped} dropped{cost}") : Invariant($"{dropped} contracts dropped{cost}"));
             if (refused > 0)
-                parts.Add(refused == 1 && dropped == 0 ? "A raise was refused: see the contract" : $"{refused} not raised");
+                parts.Add(refused == 1 && dropped == 0 ? "A raise was refused: see the contract" : Invariant($"{refused} not raised"));
             return string.Join("; ", parts);
         }
 

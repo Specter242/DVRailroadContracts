@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using DV.Booklets;
@@ -95,7 +96,13 @@ namespace Contracts.Mod.Runtime
             switch (kind)
             {
                 case StationMoves.Kind.SpotLoad:
-                    var names = (cargo ?? new List<CargoType>()).Where(c => c != CargoType.None).Select(c => LocalizationAPI.L(c.ToV2().localizationKeyFull)).ToList();
+                    var names = (cargo ?? new List<CargoType>())
+                        .Where(c => c != CargoType.None)
+                        .Select(c => c.ToV2()?.localizationKeyFull)
+                        .Where(k => !string.IsNullOrEmpty(k))
+                        .Select(k => LocalizationAPI.L(k))
+                        .Where(n => !string.IsNullOrEmpty(n))
+                        .ToList();
                     return names.Count == 0 ? "Spot the cars for unloading." : $"Spot {Join(names)} for unloading.";
                 case StationMoves.Kind.SpotEmpty:
                     return "Spot empty cars for loading.";
@@ -110,11 +117,11 @@ namespace Contracts.Mod.Runtime
         /// <summary>The booklet's pages and steps numbered again, a page gone.</summary>
         private static void Renumber(List<TemplatePaperData> pages)
         {
-            var total = pages.Count.ToString();
+            var total = pages.Count.ToString(CultureInfo.InvariantCulture);
             var step = 0;
             for (var i = 0; i < pages.Count; i++)
             {
-                var number = (i + 1).ToString();
+                var number = (i + 1).ToString(CultureInfo.InvariantCulture);
                 switch (pages[i])
                 {
                     case CoverPageTemplatePaperData cover:
@@ -126,12 +133,12 @@ namespace Contracts.Mod.Runtime
                         front.totalPages = total;
                         break;
                     case TaskTemplatePaperData task:
-                        task.stepNum = (++step).ToString();
+                        task.stepNum = (++step).ToString(CultureInfo.InvariantCulture);
                         task.pageNumber = number;
                         task.totalPages = total;
                         break;
                     case ValidateJobTaskTemplatePaperData validate:
-                        validate.stepNum = (++step).ToString();
+                        validate.stepNum = (++step).ToString(CultureInfo.InvariantCulture);
                         validate.pageNumber = number;
                         validate.totalPages = total;
                         break;

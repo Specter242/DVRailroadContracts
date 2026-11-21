@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using DV.ServicePenalty.UI;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Kiosk
 {
@@ -82,8 +83,8 @@ namespace Contracts.Mod.Kiosk
                 {
                     var u = row;
                     choices.Add(u.Blocker != null
-                        ? new Choice { Label = u.Label, Value = $"${u.Offer:N0}", Explain = $"{u.Label} can't be sold now.\n\n{u.Blocker}" }
-                        : new Choice { Label = u.Label, Value = $"${u.Offer:N0}", Ask = u.Ask, Act = () => desk.Sell(u.Key) });
+                        ? new Choice { Label = u.Label, Value = Invariant($"${u.Offer:N0}"), Explain = $"{u.Label} can't be sold now.\n\n{u.Blocker}" }
+                        : new Choice { Label = u.Label, Value = Invariant($"${u.Offer:N0}"), Ask = u.Ask, Act = () => desk.Sell(u.Key) });
                 }
                 if (choices.Count == 0)
                     choices.Add(new Choice { Label = "Nothing to sell", Value = "", Ask = "Locomotives and coaches you buy here can be sold back." });
@@ -100,10 +101,10 @@ namespace Contracts.Mod.Kiosk
                 {
                     var it = row;
                     choices.Add(money < it.Price
-                        ? new Choice { Label = it.Name, Value = $"${it.Price:N0}", Explain = Contracts.Core.Shop.VehicleSale.ShortOf(it.Name, it.Price, money) }
+                        ? new Choice { Label = it.Name, Value = Invariant($"${it.Price:N0}"), Explain = Contracts.Core.Shop.VehicleSale.ShortOf(it.Name, it.Price, money) }
                         : new Choice
                         {
-                            Label = it.Name, Value = $"${it.Price:N0}",
+                            Label = it.Name, Value = Invariant($"${it.Price:N0}"),
                             Ask = it.Ask,
                             Act = () => desk.Buy(coaches, it.Key, place),
                         });
@@ -120,10 +121,10 @@ namespace Contracts.Mod.Kiosk
                     var l = level;
                     // Licenses gate the contract (D19): without them, the row says what it needs.
                     choices.Add(contract.Needs != null
-                        ? new Choice { Label = $"Take at level {l}", Value = "locked", Ask = contract.Needs }
+                        ? new Choice { Label = Invariant($"Take at level {l}"), Value = "locked", Ask = contract.Needs }
                         : new Choice
                         {
-                            Label = $"Take at level {l}", Value = desk.Volume(contract, l),
+                            Label = Invariant($"Take at level {l}"), Value = desk.Volume(contract, l),
                             // How to pass the wait (mikebackwards, Nexus, 2026-11-10: "Game says I'm not
                             // tired enough ... need to wait 6 real time hours"): the game's Sleep Cooldown
                             // setting, which the mod's page hadn't named.
@@ -142,7 +143,7 @@ namespace Contracts.Mod.Kiosk
                 var c = contract;
                 choices.Add(new Choice
                 {
-                    Label = "Cars", Value = $"{cars.ToMove} to move",
+                    Label = "Cars", Value = Invariant($"{cars.ToMove} to move"),
                     Page = () => desk.Cars(c)?.Page ?? (c.Level < 1 ? "Its cars come from 06:00 the morning after it starts." : "None of its cars are on the map."),
                 });
             }
@@ -159,13 +160,13 @@ namespace Contracts.Mod.Kiosk
                 var due = desk.Penalty(contract, 0);
                 choices.Add(new Choice
                 {
-                    Label = "Ends at midnight", Value = due > 0.0 ? $"-${due:N0}" : "",
-                    Ask = due > 0.0 ? $"Ends at midnight: -${due:N0} at most" : "Ends at midnight",
+                    Label = "Ends at midnight", Value = due > 0.0 ? Invariant($"-${due:N0}") : "",
+                    Ask = due > 0.0 ? Invariant($"Ends at midnight: -${due:N0} at most") : "Ends at midnight",
                 });
                 choices.Add(new Choice
                 {
-                    Label = $"Keep level {contract.Level}", Value = "",
-                    Ask = $"Keep {contract.Short} at level {contract.Level}? It won't end at midnight.",
+                    Label = Invariant($"Keep level {contract.Level}"), Value = "",
+                    Ask = Invariant($"Keep {contract.Short} at level {contract.Level}? It won't end at midnight."),
                     Do = () => desk.RequestLevel(contract, contract.Level),
                 });
                 AddBonus(contract);
@@ -179,12 +180,12 @@ namespace Contracts.Mod.Kiosk
                 choices.Add(blocker == null
                     ? new Choice
                     {
-                        Label = $"Raise to level {asked + 1}", Value = desk.Volume(contract, asked + 1),
-                        Ask = $"Raise {contract.Short} to level {asked + 1} from midnight?",
+                        Label = Invariant($"Raise to level {asked + 1}"), Value = desk.Volume(contract, asked + 1),
+                        Ask = Invariant($"Raise {contract.Short} to level {asked + 1} from midnight?"),
                         Do = () => desk.RequestLevel(contract, asked + 1),
                     }
                     // Not yet: the row says how far it is, and the info line why while it is highlighted.
-                    : new Choice { Label = $"Raise to level {asked + 1}", Value = desk.RaiseValue(contract) ?? "locked", Ask = blocker, Hint = blocker });
+                    : new Choice { Label = Invariant($"Raise to level {asked + 1}"), Value = desk.RaiseValue(contract) ?? "locked", Ask = blocker, Hint = blocker });
             }
             // Lowering costs the penalty at midnight; a day more of history by then can only make it less.
             if (asked > 1)
@@ -192,16 +193,16 @@ namespace Contracts.Mod.Kiosk
                 var penalty = desk.Penalty(contract, asked - 1);
                 choices.Add(new Choice
                 {
-                    Label = $"Lower to level {asked - 1}", Value = penalty > 0.0 ? $"-${penalty:N0}" : "",
-                    Ask = $"Lower {contract.Short} to level {asked - 1} from midnight?" + (penalty > 0.0 ? $" Penalty up to ${penalty:N0}." : ""),
+                    Label = Invariant($"Lower to level {asked - 1}"), Value = penalty > 0.0 ? Invariant($"-${penalty:N0}") : "",
+                    Ask = Invariant($"Lower {contract.Short} to level {asked - 1} from midnight?") + (penalty > 0.0 ? Invariant($" Penalty up to ${penalty:N0}.") : ""),
                     Do = () => desk.RequestLevel(contract, asked - 1),
                 });
             }
             if (contract.Level > 0 && asked != contract.Level)
                 choices.Add(new Choice
                 {
-                    Label = $"Keep level {contract.Level}", Value = "",
-                    Ask = $"Keep {contract.Short} at level {contract.Level}?",
+                    Label = Invariant($"Keep level {contract.Level}"), Value = "",
+                    Ask = Invariant($"Keep {contract.Short} at level {contract.Level}?"),
                     Do = () => desk.RequestLevel(contract, contract.Level),
                 });
             // Ending is final at midnight, with its penalty then (a day more of history by then can
@@ -209,9 +210,9 @@ namespace Contracts.Mod.Kiosk
             var ending = desk.Penalty(contract, 0);
             choices.Add(new Choice
             {
-                Label = "End contract", Value = ending > 0.0 ? $"-${ending:N0}" : "",
+                Label = "End contract", Value = ending > 0.0 ? Invariant($"-${ending:N0}") : "",
                 Ask = contract.Level < 1 ? $"Give up {contract.Short} now? It hasn't started, so it costs nothing."
-                    : $"End {contract.Short} at midnight?" + (ending > 0.0 ? $" Penalty up to ${ending:N0}, charged then." : " It costs nothing before its first midnight.")
+                    : $"End {contract.Short} at midnight?" + (ending > 0.0 ? Invariant($" Penalty up to ${ending:N0}, charged then.") : " It costs nothing before its first midnight.")
                       + " Until then you can keep it.",
                 Do = () => desk.End(contract),
             });
@@ -224,8 +225,8 @@ namespace Contracts.Mod.Kiosk
             var bonus = Contracts.Core.Industries.ContractTerms.BonusPercent(contract.Level);
             choices.Add(new Choice
             {
-                Label = "Quick delivery bonus", Value = bonus > 0.0 ? $"{bonus:0}%" : "from L2",
-                Ask = bonus > 0.0 ? $"{bonus:0}% on day 1, {bonus / 2:0.#}% day 2, {bonus / 4:0.##}% day 3"
+                Label = "Quick delivery bonus", Value = bonus > 0.0 ? Invariant($"{bonus:0}%") : "from L2",
+                Ask = bonus > 0.0 ? Invariant($"{bonus:0}% on day 1, {bonus / 2:0.#}% day 2, {bonus / 4:0.##}% day 3")
                     : "Level 2 pays 4%, L3 6%, L4 8%, L5 10%",
             });
         }
@@ -240,14 +241,14 @@ namespace Contracts.Mod.Kiosk
             if (contract != null && contract.Id == Runtime.RuntimeDesk.SellId)
             {
                 lines.Title.text = "Sell vehicles";
-                restInfo = $"Cash ${KioskMenu.Desk?.Money ?? 0.0:N0}";
+                restInfo = Invariant($"Cash ${KioskMenu.Desk?.Money ?? 0.0:N0}");
                 ShowInfoLine();
                 return;
             }
             if (contract != null && Runtime.RuntimeDesk.ShopOf(contract.Id) is Runtime.LocoShop.Kind shop)
             {
                 lines.Title.text = shop == Runtime.LocoShop.Kind.Coaches ? "Coaches" : "Locomotives";
-                restInfo = $"Cash ${KioskMenu.Desk?.Money ?? 0.0:N0}";
+                restInfo = Invariant($"Cash ${KioskMenu.Desk?.Money ?? 0.0:N0}");
                 ShowInfoLine();
                 return;
             }
@@ -257,7 +258,7 @@ namespace Contracts.Mod.Kiosk
                 : contract.IsOffer ? KioskMenu.Desk.Legend(contract)
                 // Not started yet: when its cars come (a contract's work starts at the first service after its first midnight).
                 : contract.Level < 1 ? (Runtime.RuntimeDesk.IsPassenger(contract.Id) ? "Starts at midnight; trains from 06:00" : "Starts at midnight; cars from 06:00")
-                : Runtime.RuntimeDesk.IsPassenger(contract.Id) ? $"{KioskMenu.Desk.Volume(contract, contract.RequestedLevel)} a day, {contract.OpenWaybills} open"
+                : Runtime.RuntimeDesk.IsPassenger(contract.Id) ? Invariant($"{KioskMenu.Desk.Volume(contract, contract.RequestedLevel)} a day, {contract.OpenWaybills} open")
                 // Its cars still to move, as they are now (the Cars row has the page of them).
                 : cars?.Line ?? "";
             ShowInfoLine();

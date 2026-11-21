@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using DV.ServicePenalty.UI;
 using HarmonyLib;
 using TMPro;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Kiosk
 {
@@ -24,6 +25,8 @@ namespace Contracts.Mod.Kiosk
         }
 
         private static readonly Dictionary<CareerManagerInfoScreen, Paging> showing = new Dictionary<CareerManagerInfoScreen, Paging>();
+
+        internal static void Clear() => showing.Clear();
 
         /// <summary>Shows a text on the info screen a page at a time, going back to <paramref name="back"/> after.</summary>
         public static void Show(DisplayScreenSwitcher kiosk, CareerManagerInfoScreen screen, IDisplayScreen back, string title, string text)
@@ -54,7 +57,7 @@ namespace Contracts.Mod.Kiosk
         {
             paging.Page = Math.Max(1, Math.Min(paging.Count, paging.Page + by));
             screen.paragraph.pageToDisplay = paging.Page;
-            screen.title.text = paging.Count > 1 ? $"{paging.Title} {paging.Page}/{paging.Count}" : paging.Title;
+            screen.title.text = paging.Count > 1 ? Invariant($"{paging.Title} {paging.Page}/{paging.Count}") : paging.Title;
         }
 
         [HarmonyPatch(typeof(CareerManagerInfoScreen), nameof(CareerManagerInfoScreen.HandleInputAction))]

@@ -9,6 +9,7 @@ using DV.ThingTypes;
 using DV.Utils;
 using HarmonyLib;
 using UnityEngine;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Runtime
 {
@@ -43,7 +44,7 @@ namespace Contracts.Mod.Runtime
                 return;
             state.Owed = Math.Round(state.Owed + amount);
             var taken = Collect(state);
-            Main.Log($"contracts: penalty ${amount:N0} for {memo}; ${taken:N0} paid from the wallet, ${state.Owed:N0} owed");
+            Main.Log(Invariant($"contracts: penalty ${amount:N0} for {memo}; ${taken:N0} paid from the wallet, ${state.Owed:N0} owed"));
         }
 
         /// <summary>Takes what is owed from the wallet, as far as it goes; returns what it took.</summary>
@@ -118,7 +119,7 @@ namespace Contracts.Mod.Runtime
                         return;
                     bonuses.Remove(job);
                     bonuses.Add(job, new Box { Amount = bonus });
-                    Main.Log($"contracts: job {job.ID} earns a quick-delivery bonus of ${bonus:N0} ({cars} car(s))");
+                    Main.Log(Invariant($"contracts: job {job.ID} earns a quick-delivery bonus of ${bonus:N0} ({cars} car(s))"));
                 }
                 catch (Exception e)
                 {
@@ -163,8 +164,8 @@ namespace Contracts.Mod.Runtime
                     if (wage > 0.0)
                         inventory.AddMoney(wage);
                     paid = true;
-                    Main.Log($"contracts: job {job.ID} was turned in by a player who joined ({(away.HasValue ? $"the host is {away.Value:N0} m away" : "the host's place not known")}): " +
-                             $"its ${wage:N0} went straight into the railroad's cash");
+                    Main.Log(Invariant($"contracts: job {job.ID} was turned in by a player who joined ({(away.HasValue ? Invariant($"the host is {away.Value:N0} m away") : "the host's place not known")}): ") +
+                             Invariant($"its ${wage:N0} went straight into the railroad's cash"));
                     return false;
                 }
                 catch (Exception e)

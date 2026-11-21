@@ -71,13 +71,22 @@ namespace Contracts.Mod.Runtime
             var to = To(job);
             // The interchange tracks the job's tasks use, as its task pages show them: track "A1X"
             // (in yard "WI"; "MF" for a job of the station beside it), or "WI1X" (Interchange Yards 0.1.4).
-            var tracks = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var id in Leaves(job.tasksData).SelectMany(t => new[] { t.startTrackID, t.destinationTrackID }))
-                if (InterchangeYards.InterchangeOf(id) is string at)
-                    tracks[id.TrackPartOnly] = at;
-            if (from == null && to == null && tracks.Count == 0)
+            // Starts and ends apart: a bridge job from NEI A3X to WI A3X names "A3X" at both ends, and
+            // one map took the end's interchange for both, so its couple page said WI (the release
+            // round's career check, 2026-11-21).
+            var starts = new Dictionary<string, string>(StringComparer.Ordinal);
+            var ends = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var t in Leaves(job.tasksData))
+            {
+                if (InterchangeYards.InterchangeOf(t.startTrackID) is string from0)
+                    starts[t.startTrackID.TrackPartOnly] = from0;
+                if (InterchangeYards.InterchangeOf(t.destinationTrackID) is string to0)
+                    ends[t.destinationTrackID.TrackPartOnly] = to0;
+            }
+            if (from == null && to == null && starts.Count == 0 && ends.Count == 0)
                 return;
             var haul = LocalizationAPI.L("job/task_type_haul");
+            var uncouple = LocalizationAPI.L("job/task_type_uncouple");
             foreach (var page in pages)
                 switch (page)
                 {
@@ -101,7 +110,12 @@ namespace Contracts.Mod.Runtime
                         }
                         break;
                     case TaskTemplatePaperData task:
-                        if (task.trackId != null && tracks.TryGetValue(task.trackId, out var interchange))
+                        // A couple page is where the cars are picked up, an uncouple page where they are
+                        // left: each looks at its own end first, then the other (as all pages once did).
+                        var first = task.taskType == uncouple ? ends : starts;
+                        var second = ReferenceEquals(first, starts) ? ends : starts;
+                        if (task.trackId != null && (first.TryGetValue(task.trackId, out var interchange)
+                            || second.TryGetValue(task.trackId, out interchange)))
                         {
                             task.yardId = InterchangeYards.CodeOf(interchange);
                             task.yardColor = InterchangeYards.ColorOf(interchange);

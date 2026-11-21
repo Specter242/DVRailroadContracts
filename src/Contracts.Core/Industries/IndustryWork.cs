@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using static System.FormattableString;
 
 namespace Contracts.Core.Industries
 {
@@ -102,11 +103,11 @@ namespace Contracts.Core.Industries
                 return "ready now";
             var days = (int)Math.Floor(ready) - (int)Math.Floor(now);
             if (days >= 2)
-                return $"ready in {days} days";
+                return Invariant($"ready in {days} days");
             var minutes = (int)Math.Round((ready - Math.Floor(ready)) * 24 * 60);
             if (minutes >= 24 * 60)
                 minutes = 24 * 60 - 1;
-            var time = $"{minutes / 60:00}:{minutes % 60:00}";
+            var time = Invariant($"{minutes / 60:00}:{minutes % 60:00}");
             return days == 1 ? $"ready tomorrow {time}" : $"ready {time}";
         }
     }

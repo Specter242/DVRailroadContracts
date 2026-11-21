@@ -9,6 +9,7 @@ using DV.ThingTypes.TransitionHelpers;
 using DV.Utils;
 using HarmonyLib;
 using UnityEngine;
+using static System.FormattableString;
 
 namespace Contracts.Mod.Runtime
 {
@@ -134,7 +135,7 @@ namespace Contracts.Mod.Runtime
             if (kind != Kind.Coaches || cars.Count != 1)
                 return new[] { Row(name, cars) };
             var stem = name.Length <= NameLength - 3 ? name : name.Substring(0, NameLength - 4).TrimEnd() + ".";
-            return TrainSizes.Select(n => Enumerable.Repeat(cars[0], n).ToList()).Select(train => Row($"{stem} x{train.Count}", train));
+            return TrainSizes.Select(n => Enumerable.Repeat(cars[0], n).ToList()).Select(train => Row(Invariant($"{stem} x{train.Count}"), train));
         }
 
         /// <summary>
@@ -277,7 +278,7 @@ namespace Contracts.Mod.Runtime
 
         /// <summary>Why an item can't be bought now, for the kiosk's info screen: the money falls short, by how much.</summary>
         public static string ShortOf(Item item) =>
-            $"Not enough money for {item.Name}.\n\nIt costs ${item.Price:N0}. You have ${Money:N0}, ${Math.Max(0.0, item.Price - Money):N0} short.";
+            Invariant($"Not enough money for {item.Name}.\n\nIt costs ${item.Price:N0}. You have ${Money:N0}, ${Math.Max(0.0, item.Price - Money):N0} short.");
 
         /// <summary>The kiosk's question before a purchase: the price, and where the vehicle arrives.</summary>
         public static string AskToBuy(Item item, Kiosk.KioskPlace place)
@@ -286,7 +287,7 @@ namespace Contracts.Mod.Runtime
             var first = InterchangesFor(place).FirstOrDefault();
             var at = first == null ? "an interchange" : $"the {InterchangeYards.CodeOf(first)} interchange";
             var why = place != null && place.IsInterchange && first == place.Id ? "here" : "the nearest";
-            return $"Buy {item.Name} for ${item.Price:N0}? It arrives at once on a free track at {at} ({why}), else at the other one." +
+            return Invariant($"Buy {item.Name} for ${item.Price:N0}? It arrives at once on a free track at {at} ({why}), else at the other one.") +
                    (item.Kind == Kind.Coaches ? " Bring them to a platform to board." : "");
         }
 
@@ -304,9 +305,12 @@ namespace Contracts.Mod.Runtime
             inventory.RemoveMoney(item.Price);
             VehicleSales.Record(spawned, item.Price, item.Kind == Kind.Coaches);
             LicenseRules.LicenseOwned(spawned, null);
-            Main.Log($"shop: sold {item.Name} for ${item.Price:N0}: {string.Join(", ", spawned.Select(c => c.ID))} on {where}");
-            return $"{item.Name} delivered on {where}: {string.Join(", ", spawned.Select(c => c.ID))}.\n\n${item.Price:N0} paid. You have ${inventory.PlayerMoney:N0} left.";
+            Main.Log(Invariant($"shop: sold {item.Name} for ${item.Price:N0}: {string.Join(", ", spawned.Select(c => c.ID))} on {where}"));
+            return Invariant($"{item.Name} delivered on {where}: {string.Join(", ", spawned.Select(c => c.ID))}.\n\n${item.Price:N0} paid. You have ${inventory.PlayerMoney:N0} left.");
         }
+
+        private static bool IsTrackEmpty(Track track) =>
+            track != null && track.GetCarsFullyOnTrack().Count == 0 && track.GetCarsPartiallyOnTrack().Count == 0;
 
         /// <summary>Owned cars delivered at a station: its locomotive track, else a free storage track.</summary>
         public static List<TrainCar> Deliver(IEnumerable<TrainCarLivery> cars, StationController station, out string where)
@@ -318,14 +322,13 @@ namespace Contracts.Mod.Runtime
                          .OrderBy(s => (s.transform.position - station.transform.position).sqrMagnitude).Take(1))
             {
                 var track = spawner.locoSpawnTrack;
-                if ((spawner.transform.position - station.transform.position).magnitude > 1500f || track.LogicTrack().GetCarsFullyOnTrack().Count > 0)
+                var logicTrack = track.LogicTrack();
+                if ((spawner.transform.position - station.transform.position).magnitude > 1500f || !IsTrackEmpty(logicTrack))
                     continue;
-                var anchor = Traverse.Create(spawner).Field("spawnTrackMiddleAnchor").GetValue<GameObject>();
-                var at = anchor != null ? anchor.transform.position : Middle(track);
-                var spawned = Spawn(list, at);
+                var spawned = Spawn(list, track);
                 if (spawned != null)
                 {
-                    where = $"the locomotive track {track.LogicTrack().ID.FullDisplayID}";
+                    where = $"the locomotive track {logicTrack.ID.FullDisplayID}";
                     return spawned;
                 }
             }
@@ -334,10 +337,10 @@ namespace Contracts.Mod.Runtime
             foreach (var track in station.logicStation?.yard?.StorageTracks ?? new List<Track>())
             {
                 // Not an industry's spot track (design, "Industry spots").
-                if (organizer == null || organizer.GetFreeSpaceOnTrack(track) < length + 10.0 || track.GetCarsFullyOnTrack().Count > 0 || spots.Contains(track.ID.TrackPartOnly))
+                if (organizer == null || organizer.GetFreeSpaceOnTrack(track) < length + 10.0 || !IsTrackEmpty(track) || spots.Contains(track.ID.TrackPartOnly))
                     continue;
                 var rail = RailTrackRegistry.LogicToRailTrack.TryGetValue(track, out var r) ? r : null;
-                var spawned = rail == null ? null : Spawn(list, Middle(rail));
+                var spawned = rail == null ? null : Spawn(list, rail);
                 if (spawned != null)
                 {
                     where = $"track {track.ID.FullDisplayID}";
@@ -379,7 +382,8 @@ namespace Contracts.Mod.Runtime
             {
                 if (station == null)
                     return 0f;
-                return tracks.Select(t => RailTrackRegistry.LogicToRailTrack.TryGetValue(t, out var r) ? (Middle(r) - station.transform.position).sqrMagnitude : float.MaxValue)
+                return tracks.Select(t => RailTrackRegistry.LogicToRailTrack.TryGetValue(t, out var r) && TryMiddle(r, out var mid)
+                        ? (mid - station.transform.position).sqrMagnitude : float.MaxValue)
                     .DefaultIfEmpty(float.MaxValue).Min();
             }
             return all.OrderBy(kv => Distance(kv.Value)).ThenBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Key).ToList();
@@ -388,10 +392,17 @@ namespace Contracts.Mod.Runtime
         private static List<TrainCar> DeliverAtInterchange(IEnumerable<TrainCarLivery> cars, string interchange, out string where)
         {
             var list = cars.ToList();
-            foreach (var track in InterchangeYards.Tracks(interchange).Where(t => t.GetCarsFullyOnTrack().Count == 0))
+            var length = Length(list);
+            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            foreach (var track in InterchangeYards.Tracks(interchange))
             {
+                if (!IsTrackEmpty(track))
+                    continue;
+                var freeSpace = organizer != null ? organizer.GetFreeSpaceOnTrack(track) : track.length;
+                if (freeSpace < length + 10.0)
+                    continue;
                 var rail = RailTrackRegistry.LogicToRailTrack.TryGetValue(track, out var r) ? r : null;
-                var spawned = rail == null ? null : Spawn(list, Middle(rail));
+                var spawned = rail == null ? null : Spawn(list, rail);
                 if (spawned != null)
                 {
                     where = $"track {track.ID.FullDisplayID}";
@@ -402,18 +413,38 @@ namespace Contracts.Mod.Runtime
             return null;
         }
 
-        /// <summary>The player's own vehicles spawned, fresh: never with a cleared vehicle's number or paint (VehicleSales.Freshen).</summary>
-        private static List<TrainCar> Spawn(List<TrainCarLivery> cars, Vector3 at)
+        /// <summary>The player's own vehicles spawned on a specific track, fresh: never with a cleared vehicle's number or paint (VehicleSales.Freshen).</summary>
+        private static List<TrainCar> Spawn(List<TrainCarLivery> cars, RailTrack track)
         {
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var pointSet = track?.GetKinkedPointSet();
+            if (spawner == null || pointSet == null || pointSet.points == null || pointSet.points.Length == 0)
+                return null;
+            var data = CarSpawner.GetTrackMiddleBasedSpawnData(cars, null, track, startSpan: 0.0, flipTrainConsist: false);
+            if (data.result != CarSpawner.SpawnDataResult.OK)
+                return null;
             VehicleSales.Freshen(cars);
-            return SingletonBehaviour<CarSpawner>.Instance?.SpawnCarTypesOnClosestTrack(cars, at, null, preventAutoCoupleOnLastCars: true,
-                applyHandbrakeOnLastCars: true, startSpan: 0.0, flipTrainConsist: false, playerSpawnedCars: true, uniqueSpawnedCars: true);
+            var spawned = spawner.SpawnCars(data, preventAutoCoupleOnLastCars: true, applyHandbrakeOnLastCars: true,
+                playerSpawnedCars: true, uniqueSpawnedCars: true);
+            return spawned != null && spawned.Count > 0 ? spawned : null;
         }
 
         private static float Length(List<TrainCarLivery> cars)
         {
             var spawner = SingletonBehaviour<CarSpawner>.Instance;
             return spawner == null ? 30f * cars.Count : spawner.GetTotalCarLiveriesLength(cars, true);
+        }
+
+        private static bool TryMiddle(RailTrack track, out Vector3 middle)
+        {
+            var points = track?.GetKinkedPointSet()?.points;
+            if (points == null || points.Length == 0)
+            {
+                middle = default;
+                return false;
+            }
+            middle = (Vector3)points[points.Length / 2].position + DV.OriginShift.OriginShift.currentMove;
+            return true;
         }
 
         /// <summary>The middle of a track, in world space now.</summary>
