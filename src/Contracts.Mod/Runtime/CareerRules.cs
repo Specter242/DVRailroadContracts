@@ -1,4 +1,5 @@
 using System;
+using Contracts.Core.Shop;
 using System.Collections.Generic;
 using System.Linq;
 using DV;
@@ -21,8 +22,10 @@ namespace Contracts.Mod.Runtime
     ///   generation, which Persistent Jobs gates on the same flag (design, rule 3). The stock
     ///   generator is blocked too.
     /// - Stations never spawn locomotives (StationLocoSpawner, and the Multiplayer mod's own spawning).
-    /// - A new career starts with one DE2, owned (as a garage's vehicle is), on the locomotive
-    ///   track of the station the player starts at, and the Manual Service licence.
+    /// - A new career starts with one locomotive, owned (as a garage's vehicle is), on the
+    ///   locomotive track of the station the player starts at, and the Manual Service licence: the
+    ///   DE2, or the DM3 or S060 chosen in the mod's settings (Starters; owner, 2026-11-21), with
+    ///   its licence as a bought one has it (a steam start's lighter and shovel: StarterKit).
     /// - Contract cars are kept from the unused-car deleter and from Persistent Jobs' reassigning
     ///   of jobless cars: the mod gives each its next job itself (design, "Protection").
     /// </summary>
@@ -45,8 +48,16 @@ namespace Contracts.Mod.Runtime
             return n;
         }
 
-        /// <summary>Gives a new career its starting DE2 and Manual Service licence; true once done.</summary>
+        /// <summary>Gives a new career its starting locomotive (its row's choice, StarterChoice) and Manual Service licence; true once done.</summary>
         public static bool GiveStarter(List<string> notes)
+        {
+            var starter = StarterChoice.Current();
+            notes.Add($"starter: the career chose the {Starters.Name(starter)} (saved: {StarterChoice.Saved(SingletonBehaviour<DV.UserManagement.UserManager>.Instance?.CurrentUser?.CurrentSession) ?? "none"})");
+            return GiveStarter(notes, starter);
+        }
+
+        /// <summary>Gives a new career this starting locomotive and the Manual Service licence; true once done.</summary>
+        public static bool GiveStarter(List<string> notes, StarterLocomotive starter)
         {
             var licences = SingletonBehaviour<LicenseManager>.Instance;
             var manual = GeneralLicenseType.ManualService.ToV2();
@@ -60,16 +71,27 @@ namespace Contracts.Mod.Runtime
                 return false;
             var station = StationController.allStations?.Where(s => s != null)
                 .OrderBy(s => (s.transform.position - player.position).sqrMagnitude).FirstOrDefault();
-            var de2 = TrainCarType.LocoShunter.ToV2();
-            if (station == null || de2 == null)
+            var name = Starters.Name(starter);
+            var cars = StarterChoice.Cars(starter);
+            if (cars == null && starter != Starters.Default)
+            {
+                notes.Add($"starter: the game has no {name}; the {Starters.Name(Starters.Default)} instead");
+                name = Starters.Name(Starters.Default);
+                cars = StarterChoice.Cars(Starters.Default);
+            }
+            if (station == null || cars == null)
                 return false;
-            var spawned = LocoShop.Deliver(new[] { de2 }, station, out var where);
-            // It came free: sold back, it fetches nothing (VehicleSales).
+            var spawned = LocoShop.Deliver(cars, station, out var where);
             if (spawned != null)
+            {
+                // It came free: sold back, it fetches nothing (VehicleSales). Its licence comes with
+                // it, as a bought vehicle's does (the DE2's the career has already).
                 VehicleSales.Record(spawned, 0.0, false);
+                LicenseRules.LicenseOwned(spawned, notes);
+            }
             notes.Add(spawned == null
-                ? $"starter: no free locomotive track at {station.stationInfo.YardID} for the DE2"
-                : $"starter: DE2 {spawned[0].ID} delivered at {station.stationInfo.YardID}, {where}");
+                ? $"starter: no free locomotive track at {station.stationInfo.YardID} for the {name}"
+                : $"starter: {name} {spawned[0].ID} delivered at {station.stationInfo.YardID}, {where}");
             return spawned != null;
         }
 

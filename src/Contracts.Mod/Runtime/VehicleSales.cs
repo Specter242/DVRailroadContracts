@@ -87,8 +87,9 @@ namespace Contracts.Mod.Runtime
         public static int Protect()
         {
             var recorded = new HashSet<string>((State?.Bought ?? new List<Purchase>()).Where(p => p.Guid != null).Select(p => p.Guid), StringComparer.Ordinal);
+            var wrecks = RestorationWrecks.Cars();
             var n = 0;
-            foreach (var car in SingletonBehaviour<CarSpawner>.Instance?.AllCars?.Where(c => Sellable(c, recorded)).ToList() ?? new List<TrainCar>())
+            foreach (var car in SingletonBehaviour<CarSpawner>.Instance?.AllCars?.Where(c => Sellable(c, recorded, wrecks)).ToList() ?? new List<TrainCar>())
             {
                 car.preventDelete = true;
                 n++;
@@ -99,12 +100,14 @@ namespace Contracts.Mod.Runtime
         private static bool IsLocomotive(Unit u) => u.Cars.Any(c => c != null && CarTypes.IsLocomotive(c.carLivery));
 
         /// <summary>
-        /// Whether a car is one the player owns that the kiosk sells, not a garage's: one recorded
-        /// as bought, or a locomotive, tender, caboose or coach (a stock coach is one without
-        /// Passenger Jobs too, which gives coaches their passengers).
+        /// Whether a car is one the player owns that the kiosk sells, not a garage's and not one of
+        /// the game's restoration wrecks (RestorationWrecks, #45): one recorded as bought, or a
+        /// locomotive, tender, caboose or coach (a stock coach is one without Passenger Jobs too,
+        /// which gives coaches their passengers).
         /// </summary>
-        private static bool Sellable(TrainCar car, HashSet<string> recorded) =>
+        private static bool Sellable(TrainCar car, HashSet<string> recorded, HashSet<TrainCar> wrecks) =>
             car != null && car.uniqueCar && car.playerSpawnedCar && car.logicCar != null && car.GetComponent<HomeGarageReference>() == null
+            && !wrecks.Contains(car)
             && (recorded.Contains(car.logicCar.carGuid) || CarTypes.IsLocomotive(car.carLivery) || CarTypes.IsTender(car.carLivery)
                 || CarTypes.IsCaboose(car.carLivery) || LocoShop.IsStockCoach(car.carLivery) || LocoShop.IsCoach(car.carLivery));
 
@@ -113,7 +116,8 @@ namespace Contracts.Mod.Runtime
         {
             var bought = (State?.Bought ?? new List<Purchase>()).Where(p => p.Guid != null).GroupBy(p => p.Guid).ToDictionary(g => g.Key, g => g.First());
             var recorded = new HashSet<string>(bought.Keys, StringComparer.Ordinal);
-            var cars = SingletonBehaviour<CarSpawner>.Instance?.AllCars?.Where(c => Sellable(c, recorded)).ToList() ?? new List<TrainCar>();
+            var wrecks = RestorationWrecks.Cars();
+            var cars = SingletonBehaviour<CarSpawner>.Instance?.AllCars?.Where(c => Sellable(c, recorded, wrecks)).ToList() ?? new List<TrainCar>();
             var units = new List<List<TrainCar>>();
             // One purchase's cars go together.
             foreach (var g in cars.Where(c => bought.ContainsKey(c.logicCar.carGuid)).GroupBy(c => bought[c.logicCar.carGuid].Set))

@@ -428,8 +428,7 @@ namespace Contracts.Mod.Runtime
                         run.Doing = $"a job for {chunk.Cars.Count} car(s)";
                         try
                         {
-                            if (Write(chunk))
-                                run.Made++;
+                            run.Made += Write(chunk);
                         }
                         catch (Exception e)
                         {

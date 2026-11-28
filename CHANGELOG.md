@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.0 (2026-11-28)
+
+- Choose a new career's starting locomotive on the new-career screen: the DE2, the DM3 or the S060, or the JK3 if the Jk3 mod is installed. A steam start comes with a lighter and a shovel if your starting items don't have them.
+- Cars bound for an industry go straight to its loading or unloading track when it has room, so work starts on arrival without a separate spotting job. When the track is full, they still go to the station yard.
+- Fixed: the game's restoration locomotives counted as yours (free licenses, listed for sale). Licenses a career got this way are taken back once, unless you own that locomotive.
+- Railroad Contracts stays off beside CareerRework and says why in the main menu: both change how a career starts and how its licenses are earned.
+
 ## 0.2.2 (2026-11-21)
 
 - Performance improvements and bug fixes.

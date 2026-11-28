@@ -110,12 +110,11 @@ namespace Contracts.Mod.Runtime
         /// the jobs made. <paramref name="standingOn"/>: the track the cars stand on, when known
         /// better than their bogies say (a job just completed there; the bogies' tracks can lag).
         /// </summary>
-        private int Dispatch(List<(TrainCar Car, Waybill W)> cars, Track standingOn = null)
+        internal int Dispatch(List<(TrainCar Car, Waybill W)> cars, Track standingOn = null)
         {
             var made = 0;
             foreach (var chunk in Chunks(cars, standingOn))
-                if (Write(chunk))
-                    made++;
+                made += Write(chunk);
             return made;
         }
 
@@ -127,7 +126,7 @@ namespace Contracts.Mod.Runtime
             var groups = cars.GroupBy(c =>
             {
                 var track = standingOn ?? c.Car.logicCar.FrontBogieTrack;
-                return (Track: track, Key: JobKey(c.W, track), Loaded: c.Car.logicCar.CurrentCargoTypeInCar != CargoType.None);
+                return (Track: track, Key: JobKey(c.Car, c.W, track), Loaded: c.Car.logicCar.CurrentCargoTypeInCar != CargoType.None);
             });
             foreach (var g in groups)
             {
@@ -150,47 +149,100 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>
-        /// A group's job, or null if none could be made (its cars go idle). A car gone since the
-        /// group was made (the service writes its jobs a step a frame) idles the group; the next
-        /// service plans its cars again.
+        /// Writes the job(s) for a group, returning how many were made (0 if none could be made,
+        /// in which case its cars go idle). A car gone since the group was made (the service writes
+        /// its jobs a step a frame) idles the group; the next service plans its cars again.
         /// </summary>
-        private bool Write(Chunk chunk)
+        private int Write(Chunk chunk)
         {
             var gone = chunk.Cars.Any(c => c == null || State.Of(c.logicCar?.carGuid) == null);
             if (!gone && SpotLeg(chunk.Bills[0], chunk.Track))
-                return WriteSpot(chunk);
+                return WriteSpot(chunk) ? 1 : 0;
+            if (!gone && InboundIndustry(chunk.Bills[0], chunk.Track))
+                return WriteInbound(chunk);
             var chain = gone ? null : NextLeg(chunk.Cars, chunk.Bills, chunk.Track);
             if (chain == null)
             {
-                var first = chunk.Bills[0];
-                Main.Warn($"contracts: no job for {chunk.Cars.Count} car(s) ({string.Join(", ", chunk.Cars.Where(c => c != null).Select(c => c.ID))}) " +
-                          $"on {chunk.Track?.ID?.FullDisplayID ?? "no track"}, {first.Stage} to {first.Next ?? "?"}" +
-                          (gone ? " (a car of theirs is gone)" : "") + "; they go idle until the next service");
-                foreach (var w in chunk.Bills)
-                    if (w.Stage != Stage.OffMap)
-                        w.Stage = Stage.Idle;
-                return false;
+                IdleChunk(chunk.Cars, chunk.Bills, chunk.Track, gone);
+                return 0;
             }
             chain.FinalizeSetupAndGenerateFirstJob(false);
-            return true;
+            return 1;
+        }
+
+        private static void IdleChunk(List<TrainCar> cars, List<Waybill> bills, Track track, bool gone)
+        {
+            var first = bills[0];
+            Main.Warn($"contracts: no job for {cars.Count} car(s) ({string.Join(", ", cars.Where(c => c != null).Select(c => c.ID))}) " +
+                      $"on {track?.ID?.FullDisplayID ?? "no track"}, {first.Stage} to {first.Next ?? "?"}" +
+                      (gone ? " (a car of theirs is gone)" : "") + "; they go idle until the next service");
+            foreach (var w in bills)
+                if (w.Stage != Stage.OffMap)
+                    w.Stage = Stage.Idle;
         }
 
         /// <summary>
-        /// What cars share a job by: hauls (an empty to its shipper's station, a load to its
-        /// receiver's) go together to the same station, whatever each carries; a load at its
-        /// shipper goes with the cars of the same cargo for the same place; an unload with the
-        /// cars unloading there; cars leaving with those for the same interchange.
+        /// Inbound cars heading to an industry (#59): sent straight to the industry's loading or
+        /// unloading tracks when those tracks have room (holding their room across unaccepted and
+        /// in-progress jobs via <see cref="SpotRooms"/>), falling back to the station yard only
+        /// for cars that do not fit.
         /// </summary>
-        private string JobKey(Waybill w, Track track)
+        private int WriteInbound(Chunk chunk)
+        {
+            var w = chunk.Bills[0];
+            var next = Economy.Station(Economy.StationOf(w.Next));
+            var cargo = TrackCargo(chunk.Cars[0], w);
+            var spots = IndustryTracks(next, cargo);
+            var rooms = SpotRooms(spots);
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var cuts = DirectDelivery.Plan(chunk.Cars.Count, spots, rooms, (from, count) =>
+            {
+                var slice = new List<Car>(count);
+                for (var i = 0; i < count; i++)
+                    slice.Add(chunk.Cars[from + i].logicCar);
+                return spawner.GetTotalTrainCarsLength(slice, true);
+            });
+            var made = 0;
+            foreach (var cut in cuts)
+            {
+                var cutCars = chunk.Cars.GetRange(cut.From, cut.Count);
+                var cutBills = chunk.Bills.GetRange(cut.From, cut.Count);
+                var chain = NextLeg(cutCars, cutBills, chunk.Track, cut.Track);
+                if (chain == null)
+                {
+                    IdleChunk(cutCars, cutBills, chunk.Track, gone: false);
+                    continue;
+                }
+                chain.FinalizeSetupAndGenerateFirstJob(false);
+                made++;
+                if (cut.Track != null)
+                    Main.Log($"contracts: {cutCars.Count} car(s) ({string.Join(", ", cutCars.Select(c => c.ID))}) billed straight to {cut.Track.ID.FullDisplayID} at {w.Next}");
+            }
+            return made;
+        }
+
+        /// <summary>
+        /// What cars share a job by: inbound hauls to an industry go with cars heading for the same
+        /// station and the same industry tracks (#59) so they can deliver straight there; freed
+        /// empties with no cargo share a haul to the same station; cars at their industry's station
+        /// share a spot job for the same tracks; cars leaving share a haul to the same interchange.
+        /// </summary>
+        private string JobKey(TrainCar car, Waybill w, Track track)
         {
             var nextStation = Economy.StationOf(w.Next) ?? w.Next;
             var here = track?.ID == null || track.ID.IsGeneric() ? null : track.ID.yardId;
             // At its industry's station: spotted next, with the cars for the same industry tracks.
             if (SpotLeg(w, track))
             {
-                var cargo = w.Cargo != null && Enum.TryParse(w.Cargo, out CargoType c) ? c : CargoType.None;
+                var cargo = TrackCargo(car, w);
                 var tracks = IndustryTracks(Economy.Station(here), cargo).Select(t => t.ID.FullID).OrderBy(id => id, StringComparer.Ordinal);
                 return $"spot>{w.Next}>{(Loads(w) ? "load" : "unload")}>{string.Join("+", tracks)}";
+            }
+            if (InboundIndustry(w, track))
+            {
+                var cargo = TrackCargo(car, w);
+                var tracks = IndustryTracks(Economy.Station(nextStation), cargo).Select(t => t.ID.FullID).OrderBy(id => id, StringComparer.Ordinal);
+                return $"{w.Stage}>{nextStation}>{string.Join("+", tracks)}";
             }
             switch (w.Stage)
             {
@@ -203,7 +255,7 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>The job chain for cars' next leg, by their waybills' stage (all alike); null if none could be made (they go idle).</summary>
-        private JobChainController NextLeg(List<TrainCar> cars, List<Waybill> bills, Track track)
+        private JobChainController NextLeg(List<TrainCar> cars, List<Waybill> bills, Track track, Track destinationTrack = null)
         {
             var w = bills[0];
             if (jobRng == null)
@@ -225,11 +277,11 @@ namespace Contracts.Mod.Runtime
                     // A freed empty for a shipper at the station it was freed at: off the industry track, into storage.
                     if (next == here)
                         return Pull(cars, here, track);
-                    return PersistentJobs.EmptyHaul(here, next, track, cars, random, null);
+                    return PersistentJobs.EmptyHaul(here, next, track, cars, random, destinationTrack);
                 case Stage.ToReceiver:
                     if (next == null)
                         return null;
-                    return PersistentJobs.Transport(here, track, next, cars, Cargo(cars), random, false, null);
+                    return PersistentJobs.Transport(here, track, next, cars, Cargo(cars), random, false, destinationTrack);
                 case Stage.ToInterchange:
                 {
                     var to = Economy.Station(InterchangeYards.StationOf(w.Next));

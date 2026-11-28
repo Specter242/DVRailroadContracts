@@ -23,6 +23,8 @@
     <Compile Remove="Spike/**" />
     <Compile Remove="Runtime/Probe.cs" />
     <Compile Remove="Runtime/Survey.cs" />
+    <Compile Remove="Runtime/NewCareerCheck.cs" />
+    <Compile Remove="Runtime/RestorationCheck.cs" />
   </ItemGroup>
 
   <!-- Game and loader assemblies are referenced in place and never copied. -->
@@ -40,6 +42,8 @@
     <Reference Include="UnityEngine.CoreModule" HintPath="$(DvManagedDir)/UnityEngine.CoreModule.dll" Private="false" />
     <Reference Include="UnityEngine.ScreenCaptureModule" HintPath="$(DvManagedDir)/UnityEngine.ScreenCaptureModule.dll" Private="false" />
     <Reference Include="UnityEngine.UI" HintPath="$(DvManagedDir)/UnityEngine.UI.dll" Private="false" />
+    <Reference Include="DV.UI" HintPath="$(DvManagedDir)/DV.UI.dll" Private="false" />
+    <Reference Include="DV.UIFramework" HintPath="$(DvManagedDir)/DV.UIFramework.dll" Private="false" />
     <Reference Include="DV.Inventory" HintPath="$(DvManagedDir)/DV.Inventory.dll" Private="false" />
     <Reference Include="DV.WeatherSystem" HintPath="$(DvManagedDir)/DV.WeatherSystem.dll" Private="false" />
     <Reference Include="DV.RailTrack" HintPath="$(DvManagedDir)/DV.RailTrack.dll" Private="false" />

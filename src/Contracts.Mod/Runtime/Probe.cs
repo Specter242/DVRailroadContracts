@@ -317,6 +317,12 @@ namespace Contracts.Mod.Runtime
             yield return MultiplayerCheck();
             Try("starter", StarterCheck);
             yield return null;
+            // At MF, as a new career starts beside a stock station (at the end of the run the player
+            // stands at West Interchange, whose station has no locomotive or storage track: starter-probe1).
+            Try("the other starters", StarterChoicesCheck);
+            yield return null;
+            Try("a steam start's lighter and shovel", StarterKitCheck);
+            yield return null;
             Try("shop", ShopCheck);
             yield return null;
             yield return SaleCheck();
@@ -327,6 +333,7 @@ namespace Contracts.Mod.Runtime
             Try("contract and service", () => taken = ServiceCheck(rt));
             yield return new WaitForSeconds(3f);
             Try("jobs", () => JobsCheck(rt, taken));
+            Try("direct delivery to industry tracks", () => DirectDeliveryCheck(rt, taken));
             Try("jobs as Multiplayer's players build them", MultiplayerJobsCheck);
             yield return BookletsCheck(taken);
             yield return Legs(rt, taken);
@@ -340,6 +347,7 @@ namespace Contracts.Mod.Runtime
                     break;
             }
             Try("every car between legs has a job, is worked, or waits for room", () => Settled(rt, taken));
+            yield return DirectFallbackCheck(rt);
             if (taken != null && movesChecked == 0)
                 Problem("papers: the legs had no move within a station to check");
             if (taken != null && interchangePapersChecked == 0)
@@ -624,6 +632,82 @@ namespace Contracts.Mod.Runtime
                 Problem("starter: an owned locomotive is not kept from the comms radio's Clear");
             if (units.Count(u => u.Cars.Any(c => CarTypes.IsLocomotive(c.carLivery))) == 1 && (ask == null || !ask.Contains("It is your only locomotive")))
                 Problem("starter: selling the only locomotive is not warned of");
+        }
+
+        /// <summary>
+        /// The other starting locomotives the new-career row offers (Starters.Offered; the JK3 when
+        /// its mod is loaded): each delivered as the DE2 is, at the station nearest the player,
+        /// owned, whole (a tender with its engine), on one track and fully on it, on the rails,
+        /// kept from Clear, free to sell back, with its licence; then taken away again.
+        /// </summary>
+        private void StarterChoicesCheck()
+        {
+            var licences = SingletonBehaviour<LicenseManager>.Instance;
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var offered = StarterChoice.Offered();
+            Line($"starters offered: {string.Join(", ", offered.Select(Contracts.Core.Shop.Starters.Name))} (Jk3 loaded {StarterChoice.Jk3Installed()})");
+            foreach (var starter in offered.Where(s => s != Contracts.Core.Shop.Starters.Default))
+            {
+                var name = Contracts.Core.Shop.Starters.Name(starter);
+                var cars = StarterChoice.Cars(starter);
+                var liveries = new HashSet<TrainCarLivery>(cars ?? new List<TrainCarLivery>());
+                var had = spawner.AllCars.Where(c => c.uniqueCar && liveries.Contains(c.carLivery)).ToList();
+                var licence = cars?.FirstOrDefault()?.requiredLicense;
+                var licensedBefore = licence == null || licences.IsGeneralLicenseAcquired(licence);
+                var notes = new List<string>();
+                var given = CareerRules.GiveStarter(notes, starter);
+                foreach (var n in notes)
+                    Line(n);
+                var got = spawner.AllCars.Where(c => c.uniqueCar && liveries.Contains(c.carLivery) && !had.Contains(c)).ToList();
+                var licensed = licence == null || licences.IsGeneralLicenseAcquired(licence);
+                var unit = VehicleSales.Owned().FirstOrDefault(u => u.Cars.Any(c => got.Contains(c)));
+                var offer = unit == null ? null : VehicleSales.Ask(unit);
+                var track = got.FirstOrDefault()?.logicCar?.FrontBogieTrack;
+                var fits = track != null && got.All(c => c.logicCar.FrontBogieTrack == track && c.logicCar.RearBogieTrack == track) &&
+                           got.All(c => track.GetCarsFullyOnTrack().Contains(c.logicCar));
+                var onRails = got.All(c => !c.derailed);
+                Line($"starter {name}: given {given}; cars {string.Join(" + ", (cars ?? new List<TrainCarLivery>()).Select(l => l.id))}; " +
+                     $"new owned {got.Count} ({string.Join(", ", got.Select(c => $"{c.ID} {c.carLivery.id} on {c.logicCar.FrontBogieTrack?.ID?.FullDisplayID}"))}); " +
+                     $"on one track and fully on it {fits}{(track == null ? "" : Invariant($" ({track.ID.FullDisplayID}, {track.length:F0} m)"))}; on the rails {onRails}; " +
+                     $"licence {licence?.id ?? "none"} {(licensedBefore ? "held before" : licensed ? "acquired" : "NOT acquired")}; kept from Clear {got.All(c => c.preventDelete)}; selling it asks: {offer}");
+                if (cars == null || !given || got.Count != cars.Count || !fits || !onRails || !licensed || got.Any(c => !c.preventDelete) || unit == null)
+                    Problem($"starter {name}: not given as the DE2 is (whole, fitting its track, on the rails, owned, kept, sold back, with its licence)");
+                foreach (var c in got)
+                    spawner.DeleteCar(c);
+            }
+        }
+
+        /// <summary>
+        /// A steam start's lighter and shovel (StarterKit): added to the game's Basic starting
+        /// items, as real items, and nothing added to its Expanded ones or for a diesel start.
+        /// </summary>
+        private void StarterKitCheck()
+        {
+            List<DV.Items.StartingItems.StartingItem> Of(string asset) =>
+                Resources.FindObjectsOfTypeAll<DV.Items.StartingItems>().FirstOrDefault(s => s.name == asset)?.GetStartingItems();
+            string Names(IEnumerable<DV.Items.StartingItems.StartingItem> items) => string.Join(", ", items.Select(i => i.item != null ? i.item.ItemPrefabName : "none"));
+            var basic = Of("StartingItemsBasic");
+            var expanded = Of("StartingItemsExpanded");
+            if (basic == null || expanded == null)
+            {
+                Problem($"starter kit: the game's starting items not found (Basic {basic != null}, Expanded {expanded != null})");
+                return;
+            }
+            var steamBasic = StarterKit.WithKit(basic, Contracts.Core.Shop.StarterLocomotive.S060, out var addedBasic);
+            var steamExpanded = StarterKit.WithKit(expanded, Contracts.Core.Shop.StarterLocomotive.S060, out var addedExpanded);
+            var dieselBasic = StarterKit.WithKit(basic, Contracts.Core.Shop.StarterLocomotive.DM3, out var addedDiesel);
+            StarterKit.WithKit(basic, Contracts.Core.Shop.StarterLocomotive.JK3, out var addedJk3);
+            Line($"starter kit: Basic {Names(basic)}; with an S060 start: + {string.Join(", ", addedBasic)}");
+            Line($"starter kit: Expanded adds {string.Join(", ", addedExpanded)} ({expanded.Count} items); a DM3 start on Basic adds {string.Join(", ", addedDiesel)}; a JK3 start on Basic adds {string.Join(", ", addedJk3)}");
+            if (!addedJk3.SequenceEqual(new[] { "lighter", "shovel" }))
+                Problem("starter kit: a JK3 start on Basic items does not get the lighter and shovel");
+            var kit = steamBasic.Skip(basic.Count).ToList();
+            if (!addedBasic.SequenceEqual(new[] { "lighter", "shovel" }) || kit.Count != 2 || kit.Any(i => i.item == null || i.item.GetComponent<InventoryItemSpec>() == null))
+                Problem("starter kit: an S060 start on Basic items does not get a real lighter and shovel");
+            if (addedExpanded.Count > 0 || !ReferenceEquals(steamExpanded, expanded))
+                Problem("starter kit: an S060 start on Expanded items got another lighter or shovel");
+            if (addedDiesel.Count > 0 || !ReferenceEquals(dieselBasic, basic))
+                Problem("starter kit: a diesel start got a lighter or shovel");
         }
 
         private void ShopCheck()
@@ -1054,6 +1138,165 @@ namespace Contracts.Mod.Runtime
                 Problem("no contract car got a job");
             var onInterchange = cars.Count(c => InterchangeYards.IsInterchangeTrack(c.logicCar.FrontBogieTrack));
             Line($"jobs: {cars.Count} contract car(s), {onInterchange} on interchange tracks, {without} without a job");
+        }
+
+        /// <summary>
+        /// Direct delivery to industry tracks (#59): inbound jobs to an industry with room on its
+        /// loading/unloading tracks name those tracks directly as their destination, without
+        /// overbooking any track's free space.
+        /// </summary>
+        private void DirectDeliveryCheck(ContractRuntime rt, string contract)
+        {
+            if (contract == null)
+                return;
+            var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var directJobs = 0;
+            var yardJobs = 0;
+            var booked = new Dictionary<Track, List<Car>>();
+            foreach (var g in rt.State.Waybills
+                         .Where(w => w.Contract == contract && (w.Stage == Stage.ToReceiver || w.Stage == Stage.ToShipper && w.Cargo != null))
+                         .Select(w => (W: w, Car: registry.GetTrainCarByCarGuid(w.Guid)))
+                         .Where(x => x.Car != null)
+                         .GroupBy(x => jobs.GetJobOfCar(x.Car.logicCar)))
+            {
+                var job = g.Key;
+                if (job == null)
+                    continue;
+                var dest = ContractRuntime.JobDestination(job);
+                var first = g.First();
+                var station = Economy.Station(rt.Economy.StationOf(first.W.Next));
+                var cargo = first.W.Stage == Stage.ToReceiver
+                    ? first.Car.logicCar.CurrentCargoTypeInCar
+                    : Enum.TryParse(first.W.Cargo, out CargoType c) ? c : CargoType.None;
+                var spots = ContractRuntime.IndustryTracks(station, cargo);
+                var isDirect = dest != null && spots.Contains(dest);
+                if (isDirect)
+                {
+                    directJobs++;
+                    if (!booked.TryGetValue(dest, out var list))
+                        booked[dest] = list = new List<Car>();
+                    list.AddRange(g.Select(x => x.Car.logicCar));
+                }
+                else
+                {
+                    yardJobs++;
+                }
+                Line($"direct: {job.ID} ({first.W.Stage}, {cargo}) -> {dest?.ID?.FullDisplayID ?? "?"} ({(isDirect ? "industry track" : "station yard")}), {g.Count()} car(s)");
+            }
+            if (directJobs == 0)
+                Problem($"direct: no inbound job for {contract} went straight to an industry track (yard jobs: {yardJobs})");
+            foreach (var kv in booked)
+            {
+                var len = spawner.GetTotalCarsLength(kv.Value, true);
+                var free = organizer.GetFreeSpaceOnTrack(kv.Key);
+                Line($"direct: track {kv.Key.ID.FullDisplayID} booked {len:F1} m of {free:F1} m free ({kv.Value.Count} car(s))");
+                if (len > free + 0.5)
+                    Problem($"direct: track {kv.Key.ID.FullDisplayID} overbooked ({len:F1} m > {free:F1} m free)");
+            }
+        }
+
+        /// <summary>
+        /// Full-track fallback for direct delivery (#59): when an industry's unloading track has no
+        /// room, an inbound haul goes to the station yard instead; once the industry track clears
+        /// and the haul arrives, a StationMoves shunting job spots the car onto the industry track.
+        /// </summary>
+        private IEnumerator DirectFallbackCheck(ContractRuntime rt)
+        {
+            var cms = Economy.Station("CMS");
+            var spots = ContractRuntime.IndustryTracks(cms, CargoType.ToolsIskar);
+            var spot = spots.FirstOrDefault();
+            var startTrack = InterchangeYards.Tracks("MF West")
+                .FirstOrDefault(t => t.GetCarsFullyOnTrack().Count == 0 && t.GetCarsPartiallyOnTrack().Count == 0 && RailTrackRegistry.LogicToRailTrack.ContainsKey(t));
+            var carTypeName = rt.Economy?.Data?.CarTypes("ToolsIskar").FirstOrDefault();
+            if (cms == null || spot == null || startTrack == null || carTypeName == null
+                || !Globals.G.Types.TryGetCarType(carTypeName, out var carType) || carType.liveries == null || carType.liveries.Count == 0)
+            {
+                Line("direct fallback: skipped (missing CMS spot, free WI track, or ToolsIskar car type)");
+                yield break;
+            }
+            var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
+            var spawner = SingletonBehaviour<CarSpawner>.Instance;
+            var jobs = SingletonBehaviour<JobsManager>.Instance;
+            TrainCar testCar = null;
+            Waybill bill = null;
+            float reserved = 0f;
+            try
+            {
+                var spawned = spawner.SpawnCarTypesOnTrack(new List<TrainCarLivery> { carType.liveries[0] }, null, RailTrackRegistry.LogicToRailTrack[startTrack], true, true);
+                testCar = spawned?.FirstOrDefault();
+                if (testCar == null)
+                {
+                    Problem("direct fallback: could not spawn test car on WI");
+                    yield break;
+                }
+                testCar.logicCar.LoadCargo(testCar.logicCar.capacity, CargoType.ToolsIskar);
+                bill = new Waybill
+                {
+                    Guid = testCar.logicCar.carGuid, Contract = "CMS", Cargo = "ToolsIskar",
+                    Next = "CMS", At = "MF West", Stage = Stage.ToReceiver, Opened = ContractRuntime.Clock,
+                };
+                rt.State.Add(bill);
+
+                // Fill the industry track's free space so the inbound haul must fall back to CMS's yard.
+                var free = organizer.GetFreeSpaceOnTrack(spot);
+                if (free > 1.0)
+                {
+                    reserved = (float)free;
+                    organizer.ReserveSpace(spot, reserved, false);
+                }
+                var made = rt.Dispatch(new List<(TrainCar, Waybill)> { (testCar, bill) }, startTrack);
+                var haul = jobs.GetJobOfCar(testCar.logicCar);
+                var haulDest = ContractRuntime.JobDestination(haul);
+                Line($"direct fallback: with {spot.ID.FullDisplayID} full ({organizer.GetFreeSpaceOnTrack(spot):F1} m free): made {made}, job {haul?.ID ?? "none"} -> {haulDest?.ID?.FullDisplayID ?? "?"}");
+                if (haul == null || haulDest == null || spots.Contains(haulDest))
+                {
+                    Problem($"direct fallback: expected yard fallback when {spot.ID.FullDisplayID} is full, got {haulDest?.ID?.FullDisplayID ?? "no job"}");
+                    yield break;
+                }
+
+                // Clear the industry track and complete the yard haul -> must write a StationMoves SU spotting job.
+                if (reserved > 0f)
+                {
+                    organizer.ReleaseReservedSpace(spot, reserved);
+                    reserved = 0f;
+                }
+                var list = new List<TrainCar> { testCar };
+                var before = Prepare(rt, haul, list);
+                yield return new WaitForSeconds(0.5f);
+                Line(Complete(rt, haul, list, before));
+
+                var spotJob = jobs.GetJobOfCar(testCar.logicCar);
+                var spotDest = ContractRuntime.JobDestination(spotJob);
+                Line($"direct fallback: on arrival at yard: spot job {spotJob?.ID ?? "none"} ({spotJob?.jobType}) -> {spotDest?.ID?.FullDisplayID ?? "?"}");
+                if (spotJob == null || spotDest != spot || StationMoves.KindOf(spotJob.ID, spotJob.jobType) != StationMoves.Kind.SpotLoad)
+                {
+                    Problem($"direct fallback: arriving at yard did not write a StationMoves SpotLoad job to {spot.ID.FullDisplayID}");
+                    yield break;
+                }
+                Try($"papers of {spotJob.ID}", () => Papers(spotJob));
+
+                before = Prepare(rt, spotJob, list);
+                yield return new WaitForSeconds(0.5f);
+                Line(Complete(rt, spotJob, list, before));
+                if (bill.Stage != Stage.BeingUnloaded)
+                    Problem($"direct fallback: completing spot job left stage {bill.Stage}, not BeingUnloaded");
+            }
+            finally
+            {
+                if (reserved > 0f)
+                    organizer.ReleaseReservedSpace(spot, reserved);
+                if (testCar != null)
+                {
+                    var remainingJob = jobs.GetJobOfCar(testCar.logicCar);
+                    if (remainingJob != null && remainingJob.State == JobState.Available)
+                        ContractRuntime.Withdraw(remainingJob);
+                    rt.State.Remove(testCar.logicCar.carGuid);
+                    spawner.DeleteCar(testCar);
+                }
+            }
         }
 
         private int serviceDay;
@@ -3176,6 +3419,21 @@ namespace Contracts.Mod.Runtime
             }
             foreach (var n in rt.Notes)
                 Line("note: " + n);
+            Try("save: licences", () =>
+            {
+                var licences = SingletonBehaviour<LicenseManager>.Instance;
+                Line($"save: licences held: {string.Join(", ", Globals.G.Types.generalLicenses.Where(licences.IsGeneralLicenseAcquired).Select(l => l.id))}; " +
+                     $"the wrecks' licences checked {rt.State.WreckLicencesChecked}; owned locomotives {string.Join(", ", VehicleSales.Owned().SelectMany(u => u.Cars).Where(c => CarTypes.IsLocomotive(c.carLivery)).Select(c => c.carLivery.id))}");
+                if (!rt.State.WreckLicencesChecked)
+                    Problem("save: the wrecks' licences were not checked");
+                // The licence items among the player's things, and what each licence's booklet is called.
+                foreach (var storage in SingletonBehaviour<StorageController>.Instance.allStorages.Where(x => x != null))
+                    foreach (var item in storage.GetStorageItemList().Where(i => i != null && i.InventorySpecs != null && (i.InventorySpecs.ItemPrefabName ?? "").IndexOf("icense", StringComparison.OrdinalIgnoreCase) >= 0))
+                        Line($"save: licence item in {storage.storageType}: {item.InventorySpecs.ItemPrefabName} ({item.gameObject.name}), the player's {item.InventorySpecs.BelongsToPlayer}, " +
+                             $"booklet of {item.GetComponentInChildren<DV.RenderTextureSystem.BookletRender.StaticLicenseBookletRender>(true)?.generalLicense?.id ?? "none"}");
+                foreach (var l in Globals.G.Types.generalLicenses.Where(l => new[] { "DE2", "DM3", "DH4", "DE6", "S060", "SH282" }.Contains(l.id)))
+                    Line($"save: {l.id}: booklet {l.licensePrefab?.name} ({l.licensePrefab?.GetComponent<InventoryItemSpec>()?.ItemPrefabName}), info {l.licenseInfoPrefab?.name} ({l.licenseInfoPrefab?.GetComponent<InventoryItemSpec>()?.ItemPrefabName})");
+            });
             var loadErrors = errors.Where(e => e.Contains("Skipping load") || e.Contains("Couldn't find corresponding") || e.StartsWith("Exception")).ToList();
             foreach (var e in loadErrors)
                 Problem("save: loading: " + e);

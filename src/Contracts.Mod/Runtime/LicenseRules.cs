@@ -85,14 +85,17 @@ namespace Contracts.Mod.Runtime
         /// Owning a vehicle licenses it (owner, 2026-11-03: "it seems a little excessive to require
         /// a license and a purchase"). The game locks the cab of a locomotive without its license,
         /// so a bought vehicle comes with it, and so does every one the player owns when a save
-        /// loads (bought before this rule). Locomotives come only from the shop (D17).
+        /// loads (bought before this rule). Locomotives come only from the shop (D17). The game's
+        /// restoration wrecks are nobody's until restored (RestorationWrecks, #45): their licences
+        /// are the player's to buy, as the game's restoration asks.
         /// </summary>
         public static void LicenseOwned(IEnumerable<TrainCar> cars, List<string> notes)
         {
             var licenses = SingletonBehaviour<LicenseManager>.Instance;
             if (licenses == null || cars == null)
                 return;
-            foreach (var car in cars.Where(c => c != null && c.uniqueCar && c.carLivery?.requiredLicense != null))
+            var wrecks = RestorationWrecks.Cars();
+            foreach (var car in cars.Where(c => c != null && c.uniqueCar && c.carLivery?.requiredLicense != null && !wrecks.Contains(c)))
             {
                 var license = car.carLivery.requiredLicense;
                 if (licenses.IsGeneralLicenseAcquired(license))

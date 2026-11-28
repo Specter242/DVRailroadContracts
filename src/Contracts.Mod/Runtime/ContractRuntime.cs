@@ -84,6 +84,13 @@ namespace Contracts.Mod.Runtime
                 var go = new GameObject("[contracts runtime]");
                 var rt = go.AddComponent<ContractRuntime>();
                 rt.State = state ?? new ContractState();
+                // A career this build starts with never got the wrecks' licences free (#45).
+                if (state == null)
+                    rt.State.WreckLicencesChecked = true;
+#if DEVTOOLS
+                if (RestorationWrecks.SimulateOldBuild)
+                    rt.State.WreckLicencesChecked = false;
+#endif
                 // A new career, or one whose starter could not be delivered at its first load.
                 rt.newCareer = state == null ? IsNewCareer() : state.StarterDue && !state.StarterGiven;
                 Instance = rt;
@@ -101,6 +108,12 @@ namespace Contracts.Mod.Runtime
                 Main.Error($"contracts: starting the runtime failed; contracts stay off: {e}");
             }
         }
+
+#if DEVTOOLS
+        private static bool OldBuild => RestorationWrecks.SimulateOldBuild;
+#else
+        private const bool OldBuild = false;
+#endif
 
         private static bool IsNewCareer()
         {
@@ -216,6 +229,20 @@ namespace Contracts.Mod.Runtime
                 foreach (var n in Notes)
                     Main.Log("contracts: " + n);
                 LogJobless("after load");
+            }
+            // Once, in a career played before this build: the licences it got free with the wrecks (#45).
+            if (!State.WreckLicencesChecked && (SingletonBehaviour<StartingItemsController>.Instance?.itemsLoaded ?? true) && !OldBuild)
+            {
+                State.WreckLicencesChecked = true;
+                try
+                {
+                    foreach (var n in RestorationWrecks.TakeBackLicences())
+                        Main.Log("contracts: " + n);
+                }
+                catch (Exception e)
+                {
+                    Main.Error($"contracts: checking the wrecks' licences failed; none were taken back: {e.Message}");
+                }
             }
             // The day moves on once the service under way is done (a second or so).
             if (service != null)

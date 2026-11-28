@@ -21,6 +21,18 @@ namespace Contracts.Mod
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
             Mod = modEntry;
+            // A mod this one can't run with (Incompatible): stay off, say so in the log and the main menu.
+            var conflict = Incompatible.Find();
+            if (conflict != null)
+            {
+                var notice = Incompatible.Notice(conflict);
+                Error(notice.Replace("\n\n", " "));
+                Incompatible.ShowInMainMenu(notice);
+#if DEVTOOLS
+                Runtime.NewCareerCheck.Install(modEntry.Path);
+#endif
+                return false;
+            }
             try
             {
 #if DEVTOOLS
@@ -54,6 +66,7 @@ namespace Contracts.Mod
 #if DEVTOOLS
                 Runtime.Probe.Install(modEntry.Path);
                 Runtime.Survey.Install(modEntry.Path);
+                Runtime.NewCareerCheck.Install(modEntry.Path);
 #endif
                 return true;
             }

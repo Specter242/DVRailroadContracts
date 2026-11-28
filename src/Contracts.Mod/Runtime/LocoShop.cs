@@ -85,6 +85,23 @@ namespace Contracts.Mod.Runtime
             (TrainCarType.PassengerBlue, "Coach, blue", null),
         };
 
+        /// <summary>One of the game's own locomotives by its shop name ("DE2", "S060"), with its tender if it has one; null if the game lacks it.</summary>
+        internal static List<TrainCarLivery> StockLocomotive(string name)
+        {
+            foreach (var (type, n, tender) in StockLocomotives)
+            {
+                if (n != name)
+                    continue;
+                if (!Globals.G.Types.TrainCarType_to_v2.TryGetValue(type, out var livery) || livery == null)
+                    return null;
+                var cars = new List<TrainCarLivery> { livery };
+                if (tender.HasValue && Globals.G.Types.TrainCarType_to_v2.TryGetValue(tender.Value, out var t) && t != null)
+                    cars.Add(t);
+                return cars;
+            }
+            return null;
+        }
+
         public static List<Item> Catalogue(Kind kind)
         {
             var items = new List<Item>();

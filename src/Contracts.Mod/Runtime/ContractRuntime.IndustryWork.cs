@@ -33,6 +33,19 @@ namespace Contracts.Mod.Runtime
                    || w.Stage == Stage.ToShipper && w.Cargo != null;
         }
 
+        /// <summary>
+        /// Whether a car is on an inter-station haul to an industry that will load or unload it
+        /// (#59): an empty with a load planned heading to its shipper, or a load heading to its
+        /// receiver, starting from another station. Cars already at the industry's station use
+        /// <see cref="SpotLeg"/>; freed empties with no load planned go to the station yard.
+        /// </summary>
+        private bool InboundIndustry(Waybill w, Track track)
+        {
+            if (w == null || track == null || SpotLeg(w, track) || !Economy.Industries.ContainsKey(w.Next))
+                return false;
+            return w.Stage == Stage.ToReceiver || w.Stage == Stage.ToShipper && w.Cargo != null;
+        }
+
         /// <summary>The cargo a car's industry track handles: the load to be, or the load it carries.</summary>
         private static CargoType TrackCargo(TrainCar car, Waybill w)
         {
@@ -298,14 +311,39 @@ namespace Contracts.Mod.Runtime
         }
 
         /// <summary>
-        /// Picks the industry track with the most room left: its free length, less the cars of spot
-        /// jobs not yet taken that head for it (Persistent Jobs reserves a job's track only when it
-        /// is taken). Scans open spot waybills once across all candidate tracks.
+        /// Picks the industry track with the most room left: its free length, less the cars of
+        /// unaccepted jobs (spot jobs and direct-to-industry hauls) heading for it.
         /// </summary>
         private (Track Best, double Room) BestSpot(List<Track> spots)
         {
             if (spots == null || spots.Count == 0)
                 return (null, 0.0);
+            var rooms = SpotRooms(spots);
+            Track best = null;
+            var bestRoom = double.NegativeInfinity;
+            for (var i = 0; i < spots.Count; i++)
+            {
+                if (best == null || rooms[i].CompareTo(bestRoom) > 0)
+                {
+                    best = spots[i];
+                    bestRoom = rooms[i];
+                }
+            }
+            return (best, bestRoom);
+        }
+
+        /// <summary>
+        /// Free room on each candidate industry track, less the cars of jobs not yet taken that
+        /// head for it: both local spot jobs (Loading/Unloading) and direct-to-industry hauls
+        /// (ToShipper/ToReceiver, #59). Persistent Jobs reserves a job's destination track on
+        /// acceptance, so InProgress jobs are already reflected in <c>GetFreeSpaceOnTrack</c>.
+        /// Scans open waybills once across all candidate tracks.
+        /// </summary>
+        private double[] SpotRooms(List<Track> spots)
+        {
+            var rooms = new double[spots?.Count ?? 0];
+            if (rooms.Length == 0)
+                return rooms;
             var organizer = SingletonBehaviour<YardTracksOrganizer>.Instance;
             var registry = SingletonBehaviour<TrainCarRegistry>.Instance;
             var jobs = SingletonBehaviour<JobsManager>.Instance;
@@ -319,7 +357,8 @@ namespace Contracts.Mod.Runtime
                 Dictionary<Job, Track> destinations = null;
                 foreach (var w in State.Waybills)
                 {
-                    if (w.Stage != Stage.Loading && w.Stage != Stage.Unloading)
+                    if (w.Stage != Stage.Loading && w.Stage != Stage.Unloading
+                        && w.Stage != Stage.ToShipper && w.Stage != Stage.ToReceiver)
                         continue;
                     var car = registry.GetTrainCarByCarGuid(w.Guid);
                     if (car == null || car.logicCar == null)
@@ -343,22 +382,15 @@ namespace Contracts.Mod.Runtime
                 }
             }
 
-            Track best = null;
-            var bestRoom = double.NegativeInfinity;
             for (var i = 0; i < spots.Count; i++)
             {
                 var track = spots[i];
                 var pending = headingByTrack != null && headingByTrack.TryGetValue(track, out var heading) && heading.Count > 0
                     ? spawner.GetTotalCarsLength(heading, true)
                     : 0f;
-                var room = organizer.GetFreeSpaceOnTrack(track) - pending;
-                if (best == null || room.CompareTo(bestRoom) > 0)
-                {
-                    best = track;
-                    bestRoom = room;
-                }
+                rooms[i] = organizer.GetFreeSpaceOnTrack(track) - pending;
             }
-            return (best, bestRoom);
+            return rooms;
         }
 
         /// <summary>
@@ -539,7 +571,7 @@ namespace Contracts.Mod.Runtime
             var all = new List<(TrainCar Car, Waybill W)>(cars);
             var mine = new HashSet<Car>(cars.Select(c => c.Car.logicCar));
             var withdrawn = new HashSet<Job>();
-            foreach (var g in cars.GroupBy(c => (Track: c.Car.logicCar.FrontBogieTrack, Key: JobKey(c.W, c.Car.logicCar.FrontBogieTrack))))
+            foreach (var g in cars.GroupBy(c => (Track: c.Car.logicCar.FrontBogieTrack, Key: JobKey(c.Car, c.W, c.Car.logicCar.FrontBogieTrack))))
             {
                 if (g.Key.Track == null || jobs == null || registry == null)
                     continue;
@@ -553,8 +585,9 @@ namespace Contracts.Mod.Runtime
                     foreach (var c in JobCars(job))
                     {
                         var w = State.Of(c?.carGuid);
-                        if (w == null || c.FrontBogieTrack != g.Key.Track || JobKey(w, g.Key.Track) != g.Key.Key
-                            || !registry.logicCarToTrainCar.TryGetValue(c, out var train) || train == null)
+                        if (w == null || c.FrontBogieTrack != g.Key.Track
+                            || !registry.logicCarToTrainCar.TryGetValue(c, out var train) || train == null
+                            || JobKey(train, w, g.Key.Track) != g.Key.Key)
                         {
                             theirs = null;
                             break;

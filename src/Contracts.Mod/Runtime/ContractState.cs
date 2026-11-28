@@ -148,6 +148,8 @@ namespace Contracts.Mod.Runtime
         // New cars the last service had no room for, and when it comes again for them (from 0.1.12).
         [JsonProperty("waiting")] public List<WaitingOrder> Waiting = new List<WaitingOrder>();
         [JsonProperty("retry")] public double? RetryAt;
+        // The licences 0.2.x gave free with the game's restoration wrecks checked, and taken back, once (#45).
+        [JsonProperty("wreckLicences")] public bool WreckLicencesChecked;
 
         [JsonIgnore] private Dictionary<string, Waybill> byGuid;
         [JsonIgnore] private int indexedCount = -1;
